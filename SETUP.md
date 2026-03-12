@@ -49,7 +49,7 @@ echo 'export PATH="$PATH:/path/to/platform-tools"' >> ~/.bashrc
 
 ```bash
 # Clone dari GitHub
-git clone https://github.com/yourusername/android-expert-mcp.git
+git clone https://github.com/dhasap/android-expert-mcp.git
 cd android-expert-mcp
 
 # ATAU buat dari awal (jika Anda copy-paste kode manual)
