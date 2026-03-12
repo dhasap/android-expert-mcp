@@ -1,0 +1,42 @@
+{
+  "name": "android-expert-mcp",
+  "version": "1.0.0",
+  "description": "Expert-level MCP Server for Android/Kotlin development, web scraping, and website auditing",
+  "main": "build/index.js",
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "start": "node build/index.js",
+    "dev": "ts-node src/index.ts",
+    "clean": "rm -rf build",
+    "rebuild": "npm run clean && npm run build",
+    "lint": "eslint src/**/*.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "mcp",
+    "android",
+    "kotlin",
+    "adb",
+    "puppeteer",
+    "lighthouse",
+    "web-audit",
+    "scraping"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "lighthouse": "^12.0.0",
+    "puppeteer": "^23.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
