@@ -60,7 +60,7 @@ Full-page screenshots, Lighthouse audit, SEO analysis, mobile responsiveness che
 ## 🚀 Quick Start
 
 ```bash
-git clone https://github.com/yourusername/android-expert-mcp.git
+git clone https://github.com/dhasap/android-expert-mcp.git
 cd android-expert-mcp
 npm install
 npm run build
