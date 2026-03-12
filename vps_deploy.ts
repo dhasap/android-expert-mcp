@@ -1,0 +1,1085 @@
+/**
+ * 🚀 VPS & Deploy Manager
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Kelola VPS Alibaba + deploy semua project dari chat AI:
+ *
+ *   • SSH connection management (simpan profil server)
+ *   • Monitor resource: RAM, CPU, disk, network (sadar VPS minim!)
+ *   • Deploy: upload file, restart service, nginx config
+ *   • Tail logs real-time dari service manapun
+ *   • Turso DB: query, migrate, backup via CLI
+ *   • Process manager: pm2 / systemd status & control
+ *   • Deployment history & rollback
+ */
+
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import * as fs from "fs/promises";
+import * as path from "path";
+import * as os from "os";
+import * as crypto from "crypto";
+import { runCommand, formatToolError, ensureDir, truncateOutput } from "../utils.js";
+
+// ─── Server Profile Store ────────────────────────────────────────────────────
+
+interface ServerProfile {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  user: string;
+  identity_file?: string;
+  password_env?: string;   // nama env var yang menyimpan password (jangan simpan plaintext)
+  tags: string[];
+  added_at: string;
+  last_used?: string;
+}
+
+interface DeployRecord {
+  id: string;
+  server_id: string;
+  project: string;
+  deployed_at: string;
+  method: string;
+  status: "success" | "failed";
+  notes?: string;
+}
+
+interface VpsStore {
+  version: string;
+  servers: ServerProfile[];
+  deploys: DeployRecord[];
+}
+
+const STORE_DIR = path.join(os.homedir(), ".android-expert-mcp");
+const VPS_STORE_FILE = path.join(STORE_DIR, "vps_store.json");
+
+async function loadStore(): Promise<VpsStore> {
+  await ensureDir(STORE_DIR);
+  try {
+    const raw = await fs.readFile(VPS_STORE_FILE, "utf-8");
+    return JSON.parse(raw) as VpsStore;
+  } catch {
+    return { version: "1.0", servers: [], deploys: [] };
+  }
+}
+
+async function saveStore(store: VpsStore): Promise<void> {
+  await fs.writeFile(VPS_STORE_FILE, JSON.stringify(store, null, 2), "utf-8");
+}
+
+// ─── SSH Command Builder ──────────────────────────────────────────────────────
+
+function buildSshCmd(
+  profile: ServerProfile,
+  remoteCmd: string,
+  extraFlags = ""
+): string {
+  const keyFlag = profile.identity_file ? `-i "${profile.identity_file}"` : "";
+  const opts = [
+    "-o StrictHostKeyChecking=no",
+    "-o ConnectTimeout=15",
+    "-o BatchMode=yes",
+    keyFlag,
+    extraFlags,
+  ].filter(Boolean).join(" ");
+
+  return `ssh ${opts} -p ${profile.port} ${profile.user}@${profile.host} "${remoteCmd.replace(/"/g, '\\"')}"`;
+}
+
+function buildScpCmd(
+  profile: ServerProfile,
+  localPath: string,
+  remotePath: string,
+  recursive = false
+): string {
+  const keyFlag = profile.identity_file ? `-i "${profile.identity_file}"` : "";
+  const opts = [
+    "-o StrictHostKeyChecking=no",
+    "-o ConnectTimeout=15",
+    keyFlag,
+    recursive ? "-r" : "",
+  ].filter(Boolean).join(" ");
+
+  return `scp ${opts} -P ${profile.port} "${localPath}" ${profile.user}@${profile.host}:"${remotePath}"`;
+}
+
+// ─── Resource Parser ─────────────────────────────────────────────────────────
+
+function parseResourceWarnings(
+  ramUsedPct: number,
+  diskUsedPct: number,
+  cpuLoad: number
+): string[] {
+  const warnings: string[] = [];
+  if (ramUsedPct > 85) warnings.push(`⚠️  RAM kritis: ${ramUsedPct.toFixed(0)}% terpakai!`);
+  else if (ramUsedPct > 70) warnings.push(`🟡 RAM tinggi: ${ramUsedPct.toFixed(0)}%`);
+  if (diskUsedPct > 90) warnings.push(`⚠️  Disk hampir penuh: ${diskUsedPct.toFixed(0)}%!`);
+  else if (diskUsedPct > 75) warnings.push(`🟡 Disk ${diskUsedPct.toFixed(0)}% terpakai`);
+  if (cpuLoad > 2.0) warnings.push(`⚠️  CPU load tinggi: ${cpuLoad.toFixed(2)}`);
+  return warnings;
+}
+
+// ─── Tool Registration ────────────────────────────────────────────────────────
+
+export function registerVpsTools(server: McpServer): void {
+
+  // ── 1. vps_add_server ────────────────────────────────────────────────────
+  server.tool(
+    "vps_add_server",
+    "Simpan profil koneksi server VPS. " +
+      "Profil disimpan lokal di ~/.android-expert-mcp/vps_store.json. " +
+      "Gunakan identity_file (SSH key) — lebih aman dari password.",
+    {
+      name: z.string().describe("Nama alias server, misal 'alibaba-prod' atau 'vps-bot'"),
+      host: z.string().describe("IP atau hostname VPS, misal '47.123.xxx.xxx'"),
+      port: z.number().int().min(1).max(65535).default(22),
+      user: z.string().default("root").describe("SSH username"),
+      identity_file: z
+        .string()
+        .optional()
+        .describe("Path ke SSH private key, misal '~/.ssh/id_rsa' atau '~/.ssh/alibaba_key'"),
+      tags: z
+        .array(z.string())
+        .default([])
+        .describe("Tag server, misal ['production', 'bot', 'alibaba']"),
+    },
+    async ({ name, host, port, user, identity_file, tags }) => {
+      try {
+        const store = await loadStore();
+
+        // Cek duplikat nama
+        const existing = store.servers.find((s) => s.name === name);
+        if (existing) {
+          // Update
+          existing.host = host;
+          existing.port = port;
+          existing.user = user;
+          existing.identity_file = identity_file
+            ? path.resolve(identity_file.replace("~", os.homedir()))
+            : undefined;
+          existing.tags = tags;
+          await saveStore(store);
+          return {
+            content: [{
+              type: "text",
+              text: `✅ Server '${name}' diperbarui.\n   Host: ${user}@${host}:${port}`,
+            }],
+          };
+        }
+
+        const profile: ServerProfile = {
+          id: crypto.randomUUID().slice(0, 8),
+          name,
+          host,
+          port,
+          user,
+          identity_file: identity_file
+            ? path.resolve(identity_file.replace("~", os.homedir()))
+            : undefined,
+          tags,
+          added_at: new Date().toISOString(),
+        };
+
+        store.servers.push(profile);
+        await saveStore(store);
+
+        return {
+          content: [{
+            type: "text",
+            text:
+              `✅ Server '${name}' disimpan!\n` +
+              `${"─".repeat(50)}\n` +
+              `ID   : ${profile.id}\n` +
+              `Host : ${user}@${host}:${port}\n` +
+              `Key  : ${profile.identity_file ?? "(tidak ada — akan minta password)"}\n` +
+              `Tags : ${tags.join(", ") || "-"}\n\n` +
+              `💡 Test koneksi: vps_exec(server="'${name}'", command="'echo ok'")`,
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: "text", text: formatToolError("vps_add_server", error) }] };
+      }
+    }
+  );
+
+  // ── 2. vps_list_servers ──────────────────────────────────────────────────
+  server.tool(
+    "vps_list_servers",
+    "Tampilkan semua server VPS yang tersimpan.",
+    {},
+    async () => {
+      try {
+        const store = await loadStore();
+        if (store.servers.length === 0) {
+          return {
+            content: [{
+              type: "text",
+              text: "📭 Belum ada server tersimpan.\nGunakan vps_add_server untuk menambahkan.",
+            }],
+          };
+        }
+
+        const lines = [
+          `🖥️  VPS Servers (${store.servers.length})`,
+          "═".repeat(55),
+        ];
+
+        store.servers.forEach((s) => {
+          lines.push(
+            `[${s.id}] ${s.name}\n` +
+            `   ${s.user}@${s.host}:${s.port}\n` +
+            `   Key : ${s.identity_file ? "✅ " + path.basename(s.identity_file) : "❌ (no key)"}\n` +
+            `   Tags: ${s.tags.join(", ") || "-"}\n` +
+            `   Last used: ${s.last_used?.slice(0, 10) ?? "never"}`
+          );
+        });
+
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (error) {
+        return { content: [{ type: "text", text: formatToolError("vps_list_servers", error) }] };
+      }
+    }
+  );
+
+  // ── 3. vps_exec ──────────────────────────────────────────────────────────
+  server.tool(
+    "vps_exec",
+    "Jalankan command SSH di server VPS. " +
+      "Gunakan ini untuk operasi apapun di server: install package, " +
+      "cek file, restart service, dll.",
+    {
+      server: z.string().describe("Nama atau ID server dari vps_list_servers"),
+      command: z.string().describe("Command yang dijalankan di server remote"),
+      timeout_seconds: z.number().int().min(5).max(300).default(30),
+      working_dir: z
+        .string()
+        .optional()
+        .describe("Working directory di server, misal '/var/www/myapp'"),
+    },
+    async ({ server: serverName, command, timeout_seconds, working_dir }) => {
+      try {
+        const store = await loadStore();
+        const profile = store.servers.find(
+          (s) => s.name === serverName || s.id === serverName
+        );
+
+        if (!profile) {
+          return {
+            content: [{
+              type: "text",
+              text: `❌ Server '${serverName}' tidak ditemukan.\nGunakan vps_list_servers untuk lihat daftar server.`,
+            }],
+          };
+        }
+
+        const fullCmd = working_dir
+          ? `cd "${working_dir}" && ${command}`
+          : command;
+
+        const sshCmd = buildSshCmd(profile, fullCmd);
+        const result = await runCommand(sshCmd, undefined, timeout_seconds * 1000);
+
+        // Update last_used
+        profile.last_used = new Date().toISOString();
+        await saveStore(store);
+
+        const output = (result.stdout + (result.stderr ? "\n[stderr]\n" + result.stderr : "")).trim();
+
+        return {
+          content: [{
+            type: "text",
+            text:
+              `💻 [${profile.name}] $ ${command}\n` +
+              `${"─".repeat(55)}\n` +
+              `Exit: ${result.exitCode}\n\n` +
+              truncateOutput(output, 8000),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: "text", text: formatToolError("vps_exec", error) }] };
+      }
+    }
+  );
+
+  // ── 4. vps_monitor ───────────────────────────────────────────────────────
+  server.tool(
+    "vps_monitor",
+    "Monitor resource VPS secara real-time: RAM, CPU, disk, network, processes. " +
+      "Sadar VPS kapasitas minim — tampilkan warning jika mendekati limit.",
+    {
+      server: z.string().describe("Nama atau ID server"),
+      show_processes: z
+        .boolean()
+        .default(true)
+        .describe("Tampilkan top 10 proses by RAM/CPU"),
+      show_network: z
+        .boolean()
+        .default(false)
+        .describe("Tampilkan info network interface"),
+    },
+    async ({ server: serverName, show_processes, show_network }) => {
+      try {
+        const store = await loadStore();
+        const profile = store.servers.find(
+          (s) => s.name === serverName || s.id === serverName
+        );
+        if (!profile) {
+          return { content: [{ type: "text", text: `❌ Server '${serverName}' tidak ditemukan.` }] };
+        }
+
+        // Jalankan semua query sekaligus via single SSH connection
+        const script = [
+          "echo '=== UPTIME ==='",
+          "uptime",
+          "echo '=== MEM ==='",
+          "free -m",
+          "echo '=== DISK ==='",
+          "df -h / 2>/dev/null || df -h",
+          "echo '=== CPU ==='",
+          "cat /proc/loadavg",
+          "nproc",
+          show_processes ? "echo '=== PROCS ==='" : "",
+          show_processes ? "ps aux --sort=-%mem | head -12" : "",
+          show_network ? "echo '=== NET ==='" : "",
+          show_network ? "ip -s link show 2>/dev/null || ifconfig 2>/dev/null | head -30" : "",
+          "echo '=== SWAP ==='",
+          "free -m | grep Swap",
+        ].filter(Boolean).join("; ");
+
+        const sshCmd = buildSshCmd(profile, script);
+        const result = await runCommand(sshCmd, undefined, 30000);
+
+        const raw = result.stdout;
+        const lines: string[] = [
+          `🖥️  VPS Monitor — ${profile.name} (${profile.host})`,
+          "═".repeat(55),
+        ];
+
+        // Parse uptime
+        const uptimeMatch = raw.match(/up\s+([^,]+),/);
+        if (uptimeMatch) lines.push(`⏱️  Uptime  : ${uptimeMatch[1].trim()}`);
+
+        // Parse CPU load
+        const loadMatch = raw.match(/=== CPU ===\n([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+        const ncpuMatch = raw.match(/=== CPU ===\n[\d. ]+\n(\d+)/);
+        if (loadMatch) {
+          const load1 = parseFloat(loadMatch[1]);
+          const ncpu = parseInt(ncpuMatch?.[1] ?? "1");
+          const loadPct = ((load1 / ncpu) * 100).toFixed(0);
+          const cpuBar = "█".repeat(Math.min(20, Math.round(load1 / ncpu * 20)));
+          const cpuEmpty = "░".repeat(Math.max(0, 20 - Math.round(load1 / ncpu * 20)));
+          lines.push(`⚡ CPU     : [${cpuBar}${cpuEmpty}] ${loadPct}% (load: ${loadMatch[1]} ${loadMatch[2]} ${loadMatch[3]})`);
+        }
+
+        // Parse memory
+        const memMatch = raw.match(/Mem:\s+(\d+)\s+(\d+)\s+(\d+)/);
+        if (memMatch) {
+          const total = parseInt(memMatch[1]);
+          const used = parseInt(memMatch[2]);
+          const free = parseInt(memMatch[3]);
+          const pct = (used / total * 100);
+          const filled = Math.round(pct / 5);
+          const bar = "█".repeat(filled) + "░".repeat(20 - filled);
+          lines.push(
+            `💾 RAM     : [${bar}] ${pct.toFixed(0)}%  ${used}MB / ${total}MB  (free: ${free}MB)`
+          );
+          parseResourceWarnings(pct, 0, parseFloat(loadMatch?.[1] ?? "0")).forEach((w) => lines.push(w));
+        }
+
+        // Parse swap
+        const swapMatch = raw.match(/Swap:\s+(\d+)\s+(\d+)/);
+        if (swapMatch) {
+          const swapTotal = parseInt(swapMatch[1]);
+          const swapUsed = parseInt(swapMatch[2]);
+          if (swapTotal > 0) {
+            lines.push(`🔄 Swap    : ${swapUsed}MB / ${swapTotal}MB`);
+          } else {
+            lines.push(`🔄 Swap    : ❌ Tidak ada swap (pertimbangkan tambah swap untuk VPS minim RAM!)`);
+          }
+        }
+
+        // Parse disk
+        const diskMatch = raw.match(/(\d+)%\s+\//);
+        if (diskMatch) {
+          const diskPct = parseInt(diskMatch[1]);
+          const diskBar = "█".repeat(Math.round(diskPct / 5)) + "░".repeat(20 - Math.round(diskPct / 5));
+          lines.push(`💿 Disk /  : [${diskBar}] ${diskPct}%`);
+          if (diskPct > 80) lines.push(`⚠️  Disk hampir penuh!`);
+        }
+
+        // Top processes
+        if (show_processes) {
+          const procsSection = raw.match(/=== PROCS ===([\s\S]*?)(?:=== |$)/);
+          if (procsSection) {
+            lines.push("", "📊 Top Processes (by RAM):");
+            const procLines = procsSection[1].trim().split("\n").slice(1, 11);
+            procLines.forEach((l) => {
+              const parts = l.trim().split(/\s+/);
+              if (parts.length >= 11) {
+                const user = parts[0];
+                const cpu = parts[2];
+                const mem = parts[3];
+                const cmd = parts.slice(10).join(" ").slice(0, 40);
+                lines.push(`   ${mem.padStart(5)}% RAM  ${cpu.padStart(5)}% CPU  ${user.padEnd(10)} ${cmd}`);
+              }
+            });
+          }
+        }
+
+        if (show_network) {
+          const netSection = raw.match(/=== NET ===([\s\S]*?)(?:=== |$)/);
+          if (netSection) {
+            lines.push("", "🌐 Network:");
+            lines.push(netSection[1].trim().slice(0, 500));
+          }
+        }
+
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (error) {
+        return { content: [{ type: "text", text: formatToolError("vps_monitor", error) }] };
+      }
+    }
+  );
+
+  // ── 5. vps_deploy ────────────────────────────────────────────────────────
+  server.tool(
+    "vps_deploy",
+    "Deploy project ke VPS via SCP + SSH. " +
+      "Upload file/folder, jalankan install commands, restart service. " +
+      "Support deploy bot Telegram, Node.js API, atau file statis.",
+    {
+      server: z.string().describe("Nama atau ID server"),
+      local_path: z.string().describe("Path lokal yang di-upload (file atau folder)"),
+      remote_path: z.string().describe("Path tujuan di server, misal '/var/www/myapp'"),
+      pre_commands: z
+        .array(z.string())
+        .default([])
+        .describe("Commands di server SEBELUM upload, misal ['pm2 stop myapp']"),
+      post_commands: z
+        .array(z.string())
+        .default([])
+        .describe("Commands di server SESUDAH upload, misal ['npm install', 'pm2 restart myapp']"),
+      exclude_patterns: z
+        .array(z.string())
+        .default(["node_modules", ".git", "__pycache__", ".env", "*.log"])
+        .describe("Pattern file/folder yang tidak ikut di-upload"),
+      project_name: z
+        .string()
+        .optional()
+        .describe("Nama project untuk dicatat di deploy history"),
+    },
+    async ({
+      server: serverName, local_path, remote_path,
+      pre_commands, post_commands, exclude_patterns, project_name,
+    }) => {
+      try {
+        const store = await loadStore();
+        const profile = store.servers.find(
+          (s) => s.name === serverName || s.id === serverName
+        );
+        if (!profile) {
+          return { content: [{ type: "text", text: `❌ Server '${serverName}' tidak ditemukan.` }] };
+        }
+
+        const resolvedLocal = path.resolve(local_path);
+        const lines: string[] = [
+          `🚀 Deploying ke ${profile.name}`,
+          "═".repeat(55),
+          `Local  : ${resolvedLocal}`,
+          `Remote : ${profile.user}@${profile.host}:${remote_path}`,
+          "",
+        ];
+
+        let deployStatus: "success" | "failed" = "success";
+
+        // 1. Pre-commands
+        if (pre_commands.length > 0) {
+          lines.push("⚡ Pre-deploy commands:");
+          for (const cmd of pre_commands) {
+            lines.push(`   $ ${cmd}`);
+            const r = await runCommand(
+              buildSshCmd(profile, cmd),
+              undefined, 60000
+            );
+            if (r.exitCode !== 0) {
+              lines.push(`   ⚠️  Exit ${r.exitCode}: ${r.stderr.slice(0, 200)}`);
+            } else {
+              lines.push(`   ✅ OK`);
+            }
+          }
+          lines.push("");
+        }
+
+        // 2. Ensure remote dir exists
+        await runCommand(
+          buildSshCmd(profile, `mkdir -p "${remote_path}"`),
+          undefined, 15000
+        );
+
+        // 3. Upload via rsync (preferred) atau scp fallback
+        lines.push("📤 Uploading files...");
+
+        const excludeFlags = exclude_patterns
+          .map((p) => `--exclude="${p}"`)
+          .join(" ");
+
+        // Cek apakah rsync tersedia
+        const rsyncCheck = await runCommand("which rsync", undefined, 5000);
+        let uploadResult;
+
+        if (rsyncCheck.exitCode === 0) {
+          const keyFlag = profile.identity_file
+            ? `-e "ssh -i ${profile.identity_file} -p ${profile.port} -o StrictHostKeyChecking=no"`
+            : `-e "ssh -p ${profile.port} -o StrictHostKeyChecking=no"`;
+
+          const rsyncCmd = `rsync -avz --progress ${excludeFlags} ${keyFlag} "${resolvedLocal}/" ${profile.user}@${profile.host}:"${remote_path}/"`;
+          uploadResult = await runCommand(rsyncCmd, undefined, 300000);
+          lines.push(`   Method: rsync`);
+        } else {
+          // Fallback ke scp
+          const scpCmd = buildScpCmd(profile, resolvedLocal, remote_path, true);
+          uploadResult = await runCommand(scpCmd, undefined, 300000);
+          lines.push(`   Method: scp`);
+        }
+
+        if (uploadResult.exitCode !== 0) {
+          lines.push(`❌ Upload gagal:\n${uploadResult.stderr.slice(0, 500)}`);
+          deployStatus = "failed";
+        } else {
+          lines.push(`✅ Upload selesai!`);
+        }
+
+        // 4. Post-commands
+        if (post_commands.length > 0 && deployStatus === "success") {
+          lines.push("");
+          lines.push("⚡ Post-deploy commands:");
+          for (const cmd of post_commands) {
+            lines.push(`   $ ${cmd}`);
+            const r = await runCommand(
+              buildSshCmd(profile, `cd "${remote_path}" && ${cmd}`),
+              undefined, 120000
+            );
+            const out = (r.stdout + r.stderr).trim().slice(0, 300);
+            if (r.exitCode !== 0) {
+              lines.push(`   ❌ Exit ${r.exitCode}: ${out}`);
+              deployStatus = "failed";
+            } else {
+              lines.push(`   ✅ ${out || "OK"}`);
+            }
+          }
+        }
+
+        // 5. Record deploy history
+        const record: DeployRecord = {
+          id: crypto.randomUUID().slice(0, 8),
+          server_id: profile.id,
+          project: project_name ?? path.basename(resolvedLocal),
+          deployed_at: new Date().toISOString(),
+          method: "scp+ssh",
+          status: deployStatus,
+        };
+        store.deploys = [record, ...store.deploys].slice(0, 50); // keep last 50
+        profile.last_used = new Date().toISOString();
+        await saveStore(store);
+
+        lines.push("");
+        lines.push(`${"─".repeat(55)}`);
+        lines.push(`${deployStatus === "success" ? "✅" : "❌"} Deploy ${deployStatus.toUpperCase()}!`);
+        lines.push(`Deploy ID: ${record.id}`);
+
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (error) {
+        return { content: [{ type: "text", text: formatToolError("vps_deploy", error) }] };
+      }
+    }
+  );
+
+  // ── 6. vps_logs ──────────────────────────────────────────────────────────
+  server.tool(
+    "vps_logs",
+    "Baca log dari server VPS: journalctl, pm2 logs, file log custom, " +
+      "atau nginx/apache access log.",
+    {
+      server: z.string().describe("Nama atau ID server"),
+      log_source: z
+        .enum(["journalctl", "pm2", "file", "nginx", "docker", "custom"])
+        .describe("Sumber log"),
+      service_name: z
+        .string()
+        .optional()
+        .describe("Nama service (untuk journalctl/pm2/docker)"),
+      log_file: z
+        .string()
+        .optional()
+        .describe("Path file log (untuk log_source 'file')"),
+      lines: z
+        .number()
+        .int()
+        .min(10)
+        .max(500)
+        .default(50)
+        .describe("Jumlah baris terakhir"),
+      filter_keyword: z
+        .string()
+        .optional()
+        .describe("Filter log yang mengandung keyword ini"),
+      since: z
+        .string()
+        .optional()
+        .describe("Filter sejak waktu tertentu, misal '1 hour ago' atau '2024-01-01'"),
+    },
+    async ({ server: serverName, log_source, service_name, log_file, lines, filter_keyword, since }) => {
+      try {
+        const store = await loadStore();
+        const profile = store.servers.find(
+          (s) => s.name === serverName || s.id === serverName
+        );
+        if (!profile) {
+          return { content: [{ type: "text", text: `❌ Server '${serverName}' tidak ditemukan.` }] };
+        }
+
+        let cmd = "";
+        switch (log_source) {
+          case "journalctl":
+            cmd = [
+              "journalctl",
+              service_name ? `-u ${service_name}` : "",
+              since ? `--since "${since}"` : `-n ${lines}`,
+              "--no-pager",
+              filter_keyword ? `| grep -i "${filter_keyword}"` : "",
+            ].filter(Boolean).join(" ");
+            break;
+
+          case "pm2":
+            cmd = service_name
+              ? `pm2 logs ${service_name} --lines ${lines} --nostream`
+              : `pm2 logs --lines ${lines} --nostream`;
+            if (filter_keyword) cmd += ` | grep -i "${filter_keyword}"`;
+            break;
+
+          case "file":
+            if (!log_file) throw new Error("log_file wajib untuk log_source 'file'");
+            cmd = filter_keyword
+              ? `tail -n ${lines} "${log_file}" | grep -i "${filter_keyword}"`
+              : `tail -n ${lines} "${log_file}"`;
+            break;
+
+          case "nginx":
+            cmd = filter_keyword
+              ? `tail -n ${lines} /var/log/nginx/access.log /var/log/nginx/error.log 2>/dev/null | grep -i "${filter_keyword}"`
+              : `tail -n ${lines} /var/log/nginx/error.log 2>/dev/null`;
+            break;
+
+          case "docker":
+            if (!service_name) throw new Error("service_name (container name) wajib untuk docker");
+            cmd = `docker logs --tail ${lines} ${service_name} 2>&1`;
+            if (filter_keyword) cmd += ` | grep -i "${filter_keyword}"`;
+            break;
+
+          case "custom":
+            cmd = log_file ?? "journalctl -n 50 --no-pager";
+            break;
+        }
+
+        const sshCmd = buildSshCmd(profile, cmd);
+        const result = await runCommand(sshCmd, undefined, 30000);
+        const output = result.stdout || result.stderr || "(no output)";
+
+        return {
+          content: [{
+            type: "text",
+            text:
+              `📋 Logs — ${profile.name} [${log_source}${service_name ? ":" + service_name : ""}]\n` +
+              `${"─".repeat(55)}\n` +
+              truncateOutput(output, 10000),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: "text", text: formatToolError("vps_logs", error) }] };
+      }
+    }
+  );
+
+  // ── 7. vps_service ───────────────────────────────────────────────────────
+  server.tool(
+    "vps_service",
+    "Kelola service di VPS: start/stop/restart/status untuk pm2 atau systemd. " +
+      "Juga bisa setup pm2 startup agar service auto-start setelah reboot.",
+    {
+      server: z.string().describe("Nama atau ID server"),
+      manager: z.enum(["pm2", "systemd"]).default("pm2"),
+      action: z
+        .enum(["status", "start", "stop", "restart", "reload", "list", "logs", "save", "startup"])
+        .describe("Aksi yang dilakukan"),
+      service_name: z
+        .string()
+        .optional()
+        .describe("Nama service/process. Kosong untuk aksi 'list'"),
+    },
+    async ({ server: serverName, manager, action, service_name }) => {
+      try {
+        const store = await loadStore();
+        const profile = store.servers.find(
+          (s) => s.name === serverName || s.id === serverName
+        );
+        if (!profile) {
+          return { content: [{ type: "text", text: `❌ Server '${serverName}' tidak ditemukan.` }] };
+        }
+
+        let cmd = "";
+        if (manager === "pm2") {
+          switch (action) {
+            case "list": cmd = "pm2 list"; break;
+            case "status": cmd = service_name ? `pm2 show ${service_name}` : "pm2 list"; break;
+            case "start": cmd = `pm2 start ${service_name}`; break;
+            case "stop": cmd = `pm2 stop ${service_name}`; break;
+            case "restart": cmd = `pm2 restart ${service_name}`; break;
+            case "reload": cmd = `pm2 reload ${service_name}`; break;
+            case "logs": cmd = `pm2 logs ${service_name ?? ""} --lines 30 --nostream`; break;
+            case "save": cmd = "pm2 save"; break;
+            case "startup": cmd = "pm2 startup && pm2 save"; break;
+          }
+        } else {
+          // systemd
+          switch (action) {
+            case "list": cmd = "systemctl list-units --type=service --state=running"; break;
+            case "status": cmd = `systemctl status ${service_name}`; break;
+            case "start": cmd = `systemctl start ${service_name}`; break;
+            case "stop": cmd = `systemctl stop ${service_name}`; break;
+            case "restart": cmd = `systemctl restart ${service_name}`; break;
+            case "reload": cmd = `systemctl reload ${service_name}`; break;
+            case "logs": cmd = `journalctl -u ${service_name} -n 30 --no-pager`; break;
+            case "save": cmd = `systemctl enable ${service_name}`; break;
+            case "startup": cmd = `systemctl enable ${service_name} && systemctl start ${service_name}`; break;
+          }
+        }
+
+        const result = await runCommand(
+          buildSshCmd(profile, cmd),
+          undefined, 30000
+        );
+        const output = (result.stdout + result.stderr).trim();
+
+        return {
+          content: [{
+            type: "text",
+            text:
+              `⚙️  [${profile.name}] ${manager} ${action} ${service_name ?? ""}\n` +
+              `${"─".repeat(55)}\n` +
+              `Exit: ${result.exitCode}\n\n` +
+              truncateOutput(output, 5000),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: "text", text: formatToolError("vps_service", error) }] };
+      }
+    }
+  );
+
+  // ── 8. vps_turso ─────────────────────────────────────────────────────────
+  server.tool(
+    "vps_turso",
+    "Operasi Turso database dari VPS atau lokal: " +
+      "query SQL, lihat schema, backup, migrate. " +
+      "Membutuhkan Turso CLI terinstall di server atau lokal.",
+    {
+      action: z
+        .enum(["query", "schema", "list_tables", "backup", "exec_file", "db_list", "db_create"])
+        .describe("Operasi Turso"),
+      database_url: z
+        .string()
+        .optional()
+        .describe("Turso DB URL, misal 'libsql://mydb-user.turso.io'. Bisa dari env TURSO_DATABASE_URL"),
+      auth_token: z
+        .string()
+        .optional()
+        .describe("Auth token Turso. Bisa dari env TURSO_AUTH_TOKEN"),
+      sql: z
+        .string()
+        .optional()
+        .describe("Query SQL untuk action 'query'"),
+      sql_file: z
+        .string()
+        .optional()
+        .describe("Path file .sql untuk action 'exec_file'"),
+      db_name: z
+        .string()
+        .optional()
+        .describe("Nama database untuk action 'db_create' atau 'db_list'"),
+      server: z
+        .string()
+        .optional()
+        .describe("Nama VPS jika jalankan via server remote. Kosong = jalankan lokal"),
+    },
+    async ({ action, database_url, auth_token, sql, sql_file, db_name, server: serverName }) => {
+      try {
+        // Resolve dari env jika tidak di-provide
+        const dbUrl = database_url ?? process.env.TURSO_DATABASE_URL;
+        const token = auth_token ?? process.env.TURSO_AUTH_TOKEN;
+
+        // Cek apakah turso CLI tersedia
+        const tursoCheck = await runCommand("which turso 2>/dev/null || turso --version 2>/dev/null", undefined, 5000);
+        const hasTursoCli = tursoCheck.exitCode === 0;
+
+        // Jika tidak ada CLI, gunakan HTTP API langsung
+        if (!hasTursoCli && ["query", "schema", "list_tables"].includes(action)) {
+          if (!dbUrl || !token) {
+            return {
+              content: [{
+                type: "text",
+                text:
+                  "❌ Turso CLI tidak ditemukan dan database_url/auth_token tidak diset.\n\n" +
+                  "Install Turso CLI:\n" +
+                  "  curl -sSfL https://get.tur.so/install.sh | bash\n\n" +
+                  "Atau set environment variables:\n" +
+                  "  TURSO_DATABASE_URL=libsql://...\n" +
+                  "  TURSO_AUTH_TOKEN=...",
+              }],
+            };
+          }
+        }
+
+        let cmd = "";
+        switch (action) {
+          case "query":
+            if (!sql) throw new Error("sql wajib untuk action 'query'");
+            if (hasTursoCli && dbUrl) {
+              cmd = `turso db shell "${dbUrl}" "${sql.replace(/"/g, '\\"')}"`;
+            } else {
+              // Fallback: gunakan libsql via node jika tersedia
+              cmd = `node -e "
+const {createClient}=require('@libsql/client');
+const db=createClient({url:'${dbUrl}',authToken:'${token}'});
+db.execute(\`${sql.replace(/`/g, "\\`")}\`).then(r=>console.log(JSON.stringify(r.rows,null,2))).catch(e=>console.error(e.message));
+"`;
+            }
+            break;
+
+          case "list_tables":
+            if (hasTursoCli && dbUrl) {
+              cmd = `turso db shell "${dbUrl}" ".tables"`;
+            } else {
+              cmd = `node -e "
+const {createClient}=require('@libsql/client');
+const db=createClient({url:'${dbUrl}',authToken:'${token}'});
+db.execute('SELECT name FROM sqlite_master WHERE type=\\'table\\' ORDER BY name').then(r=>r.rows.forEach(row=>console.log(row.name))).catch(e=>console.error(e));
+"`;
+            }
+            break;
+
+          case "schema":
+            if (hasTursoCli && dbUrl) {
+              cmd = `turso db shell "${dbUrl}" ".schema"`;
+            } else {
+              cmd = `node -e "
+const {createClient}=require('@libsql/client');
+const db=createClient({url:'${dbUrl}',authToken:'${token}'});
+db.execute('SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name').then(r=>r.rows.forEach(row=>console.log(row.sql+';'))).catch(e=>console.error(e));
+"`;
+            }
+            break;
+
+          case "db_list":
+            cmd = "turso db list";
+            break;
+
+          case "db_create":
+            if (!db_name) throw new Error("db_name wajib");
+            cmd = `turso db create ${db_name}`;
+            break;
+
+          case "backup":
+            if (!dbUrl) throw new Error("database_url wajib untuk backup");
+            const backupFile = path.join(os.homedir(), `.android-expert-mcp/turso_backup_${Date.now()}.sql`);
+            cmd = `turso db shell "${dbUrl}" ".dump" > "${backupFile}" && echo "Backup: ${backupFile}"`;
+            break;
+
+          case "exec_file":
+            if (!sql_file) throw new Error("sql_file wajib");
+            if (!dbUrl) throw new Error("database_url wajib");
+            cmd = `turso db shell "${dbUrl}" < "${path.resolve(sql_file)}"`;
+            break;
+        }
+
+        let result;
+        if (serverName) {
+          const store = await loadStore();
+          const profile = store.servers.find((s) => s.name === serverName || s.id === serverName);
+          if (!profile) throw new Error(`Server '${serverName}' tidak ditemukan`);
+          result = await runCommand(buildSshCmd(profile, cmd), undefined, 60000);
+        } else {
+          result = await runCommand(cmd, undefined, 60000);
+        }
+
+        const output = (result.stdout + (result.stderr ? "\n" + result.stderr : "")).trim();
+
+        return {
+          content: [{
+            type: "text",
+            text:
+              `🗄️  Turso — ${action}\n` +
+              `${"─".repeat(55)}\n` +
+              (dbUrl ? `DB: ${dbUrl.replace(/\/\/[^@]+@/, "//*@")}\n\n` : "") +
+              truncateOutput(output, 8000),
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: "text", text: formatToolError("vps_turso", error) }] };
+      }
+    }
+  );
+
+  // ── 9. vps_deploy_history ────────────────────────────────────────────────
+  server.tool(
+    "vps_deploy_history",
+    "Lihat history deployment ke semua server.",
+    {
+      server: z.string().optional().describe("Filter by nama server"),
+      limit: z.number().int().min(1).max(50).default(10),
+    },
+    async ({ server: serverName, limit }) => {
+      try {
+        const store = await loadStore();
+        let deploys = store.deploys;
+
+        if (serverName) {
+          const profile = store.servers.find((s) => s.name === serverName || s.id === serverName);
+          if (profile) deploys = deploys.filter((d) => d.server_id === profile.id);
+        }
+
+        deploys = deploys.slice(0, limit);
+
+        if (deploys.length === 0) {
+          return { content: [{ type: "text", text: "📭 Belum ada riwayat deploy." }] };
+        }
+
+        const lines = [`📜 Deploy History (${deploys.length})`, "═".repeat(55)];
+        deploys.forEach((d) => {
+          const serverProfile = store.servers.find((s) => s.id === d.server_id);
+          lines.push(
+            `${d.status === "success" ? "✅" : "❌"} [${d.id}] ${d.project}\n` +
+            `   Server : ${serverProfile?.name ?? d.server_id}\n` +
+            `   Time   : ${d.deployed_at.slice(0, 19).replace("T", " ")}\n` +
+            `   Status : ${d.status}`
+          );
+        });
+
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (error) {
+        return { content: [{ type: "text", text: formatToolError("vps_deploy_history", error) }] };
+      }
+    }
+  );
+
+  // ── 10. vps_optimize ─────────────────────────────────────────────────────
+  server.tool(
+    "vps_optimize",
+    "Optimasi VPS kapasitas minim: bersihkan cache, log lama, docker images, " +
+      "setup swap jika belum ada, dan rekomendasikan settings.",
+    {
+      server: z.string().describe("Nama atau ID server"),
+      actions: z
+        .array(
+          z.enum([
+            "clean_apt",
+            "clean_logs",
+            "clean_docker",
+            "setup_swap",
+            "check_all",
+          ])
+        )
+        .default(["check_all"])
+        .describe("Aksi optimasi yang dijalankan"),
+      swap_size_mb: z
+        .number()
+        .int()
+        .min(256)
+        .max(4096)
+        .default(1024)
+        .describe("Ukuran swap dalam MB jika setup_swap (default: 1024MB)"),
+      dry_run: z
+        .boolean()
+        .default(false)
+        .describe("Preview commands tanpa eksekusi"),
+    },
+    async ({ server: serverName, actions, swap_size_mb, dry_run }) => {
+      try {
+        const store = await loadStore();
+        const profile = store.servers.find(
+          (s) => s.name === serverName || s.id === serverName
+        );
+        if (!profile) {
+          return { content: [{ type: "text", text: `❌ Server '${serverName}' tidak ditemukan.` }] };
+        }
+
+        const doAll = actions.includes("check_all");
+        const lines: string[] = [
+          `🔧 VPS Optimize — ${profile.name}`,
+          dry_run ? "   ⚠️  DRY RUN — tidak ada yang dieksekusi" : "",
+          "═".repeat(55),
+        ].filter(Boolean);
+
+        const runOpt = async (label: string, cmd: string) => {
+          lines.push(`\n🔹 ${label}`);
+          lines.push(`   $ ${cmd}`);
+          if (!dry_run) {
+            const r = await runCommand(buildSshCmd(profile, cmd), undefined, 60000);
+            const out = (r.stdout + r.stderr).trim().slice(0, 400);
+            lines.push(`   ${r.exitCode === 0 ? "✅" : "⚠️ "} ${out || "OK"}`);
+          }
+        };
+
+        // Cek disk usage dulu
+        await runOpt("Disk sebelum optimasi", "df -h /");
+
+        if (doAll || actions.includes("clean_apt")) {
+          await runOpt("Bersihkan apt cache", "apt-get autoremove -y && apt-get autoclean -y 2>/dev/null || true");
+        }
+
+        if (doAll || actions.includes("clean_logs")) {
+          await runOpt("Bersihkan log > 7 hari", "find /var/log -name '*.log' -mtime +7 -delete 2>/dev/null; journalctl --vacuum-time=7d 2>/dev/null || true");
+        }
+
+        if (doAll || actions.includes("clean_docker")) {
+          await runOpt("Bersihkan Docker images & containers tidak terpakai",
+            "docker system prune -f 2>/dev/null || echo 'Docker tidak ada/tidak running'");
+        }
+
+        if (doAll || actions.includes("setup_swap")) {
+          // Cek apakah swap sudah ada
+          const swapCheck = await runCommand(
+            buildSshCmd(profile, "free -m | grep Swap | awk '{print $2}'"),
+            undefined, 10000
+          );
+          const currentSwap = parseInt(swapCheck.stdout.trim());
+
+          if (currentSwap > 0) {
+            lines.push(`\n🔹 Swap sudah ada: ${currentSwap}MB — tidak perlu setup`);
+          } else {
+            const swapCmds = [
+              `fallocate -l ${swap_size_mb}M /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=${swap_size_mb}`,
+              "chmod 600 /swapfile",
+              "mkswap /swapfile",
+              "swapon /swapfile",
+              "echo '/swapfile none swap sw 0 0' >> /etc/fstab",
+              "sysctl vm.swappiness=10",
+              "echo 'vm.swappiness=10' >> /etc/sysctl.conf",
+            ].join(" && ");
+
+            await runOpt(`Setup swap ${swap_size_mb}MB (penting untuk VPS RAM minim!)`, swapCmds);
+          }
+        }
+
+        // Cek disk setelah
+        if (!dry_run) {
+          await runOpt("Disk setelah optimasi", "df -h /");
+        }
+
+        return { content: [{ type: "text", text: lines.join("\n") }] };
+      } catch (error) {
+        return { content: [{ type: "text", text: formatToolError("vps_optimize", error) }] };
+      }
+    }
+  );
+}

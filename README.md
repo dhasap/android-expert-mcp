@@ -1,72 +1,103 @@
 # 🤖 Android Expert MCP Server
 
-> A production-grade **Model Context Protocol (MCP) Server** that gives your AI Agent expert-level capabilities in Android/Kotlin development, web scraping, and professional website auditing.
+> A production-grade **Model Context Protocol (MCP) Server** — v2.0 — that gives your AI Agent expert-level capabilities in Android/Kotlin development, web scraping, professional website auditing, **full browser control**, and **interactive UI widgets**.
 
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D18.0-green)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.5-blue)](https://typescriptlang.org)
 [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-1.x-purple)](https://github.com/modelcontextprotocol/sdk)
+[![Version](https://img.shields.io/badge/version-2.0.0-orange)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
 ---
 
-## ✨ Features
+## ✨ Features — 46 Tools, 6 Categories
 
-### 🏗️ Architecture & Planning Tools
-| Tool | Description |
-|------|-------------|
-| `read_project_structure` | Tree view of any project directory (ignores build artifacts) |
-| `read_file` | Read any file with size guard + truncation notice |
-| `write_file` | Create/overwrite files, auto-creates parent directories |
-| `edit_file` | Surgical find-and-replace edits on any file |
-| `create_architecture_doc` | Generate structured Markdown architecture documentation |
-| `list_files` | List files in a directory with optional extension filter |
+### 🏗️ Architecture & Planning Tools (6)
+File system traversal, read/write/edit files, generate architecture docs.
 
-### 📱 Kotlin, Gradle & Android ADB Tools
-| Tool | Description |
-|------|-------------|
-| `run_gradle_task` | Execute `./gradlew` tasks with stack trace extraction on failure |
-| `read_build_log` | Parse saved build logs and extract Kotlin/Java error traces |
-| `adb_list_devices` | List all connected Android devices/emulators |
-| `adb_dump_ui` | Dump UI hierarchy via `uiautomator` — analyze on-screen elements |
-| `adb_read_logcat` | Capture logcat with tag/package/level filters |
-| `adb_extract_apk` | Pull APKs from connected devices |
-| `adb_run_shell` | Execute arbitrary ADB shell commands |
-| `analyze_kotlin_file` | Structural analysis: classes, functions, coroutines, code smells |
+### 📱 Kotlin, Gradle & Android ADB Tools (8)
+Gradle task runner with stack trace extraction, ADB UI dump, logcat, APK extraction, Kotlin analyzer.
 
-### 🕷️ Web Scraping & DOM Extraction
-| Tool | Description |
-|------|-------------|
-| `scrape_page_html` | Full rendered HTML extraction via headless Puppeteer |
-| `extract_dom_structure` | Structured DOM summary: headings, links, forms, meta, OG tags |
-| `execute_js_on_page` | Run custom JavaScript on any webpage and return results |
-| `monitor_network_requests` | Capture all network requests (great for reverse-engineering SPAs) |
+### 🕷️ Web Scraping & DOM Extraction (4)
+Puppeteer-powered headless scraping, DOM extraction, JS execution, network monitor.
 
-### 🔍 Website Review & Audit
-| Tool | Description |
-|------|-------------|
-| `take_screenshot` | Full-page PNG screenshots (desktop/mobile/tablet viewports) |
-| `run_lighthouse_audit` | Full Lighthouse audit: Performance, Accessibility, SEO, Best Practices |
-| `parse_audit_report` | Parse saved Lighthouse JSON into human-readable report + recommendations |
-| `check_mobile_responsiveness` | Multi-viewport responsiveness check with issue detection |
-| `extract_seo_data` | Deep SEO analysis: titles, meta, headings, alt texts, structured data |
+### 🔍 Website Review & Audit (5)
+Full-page screenshots, Lighthouse audit, SEO analysis, mobile responsiveness check.
+
+### 🖥️ Interactive Browser Control (14) 🆕
+| Tool | Fungsi |
+|------|--------|
+| `browser_open` | Buka browser + URL, buat session persisten dengan session_id |
+| `browser_screenshot` | Screenshot kondisi browser saat ini |
+| `browser_click` | Klik elemen via CSS selector |
+| `browser_type` | Ketik teks ke form field |
+| `browser_navigate` | goto / back / forward / reload / new_tab |
+| `browser_scroll` | Scroll up/down/top/bottom/to_element |
+| `browser_get_content` | Ambil HTML/teks/links/inputs halaman |
+| `browser_wait` | Tunggu selector/network/waktu |
+| `browser_select` | Pilih dropdown, toggle checkbox |
+| `browser_execute_script` | Eksekusi JS di halaman |
+| `browser_close` | Tutup session |
+| `browser_list_sessions` | Lihat semua sesi aktif |
+| `browser_hover` | Hover untuk tooltip/dropdown |
+| `browser_keyboard` | Key khusus: Enter, Tab, Ctrl+A, dll |
+
+### 🎨 Interactive UI Widgets (9) 🆕
+| Tool | Fungsi |
+|------|--------|
+| `ui_single_choice` | Widget pilihan tunggal (seperti radio button) |
+| `ui_multi_choice` | Widget pilihan berganda (seperti checkbox) |
+| `ui_confirm` | Dialog konfirmasi sebelum aksi berbahaya |
+| `ui_menu` | Menu navigasi berjenjang |
+| `ui_progress` | Progress tracker untuk task multi-step |
+| `ui_info_card` | Kartu informasi key-value |
+| `ui_input_form` | Form multi-field terstruktur |
+| `ui_table` | Tabel ASCII dari data dinamis |
+| `ui_notification` | Notifikasi success/error/warning/tip |
 
 ---
 
 ## 🚀 Quick Start
 
-See **[SETUP.md](SETUP.md)** for detailed installation and configuration instructions.
-
-**TL;DR:**
 ```bash
 git clone https://github.com/yourusername/android-expert-mcp.git
 cd android-expert-mcp
 npm install
 npm run build
+
+# Daftarkan ke Kimi CLI
+kimi mcp add --transport stdio node /absolute/path/to/android-expert-mcp/build/index.js
 ```
 
-Then register with your AI agent:
-```bash
-kimi mcp add --transport stdio node /path/to/android-expert-mcp/build/index.js
+Lihat **[SETUP.md](SETUP.md)** untuk panduan lengkap.
+
+---
+
+## 💡 Contoh Penggunaan Browser Tools
+
+```
+# AI akan melakukan urutan operasi ini:
+"Login ke github.com dengan username saya"
+→ browser_open(url="https://github.com/login")
+→ browser_type(selector="#login_field", text="username")
+→ browser_type(selector="#password", text="***")
+→ browser_click(selector="[type=submit]")
+→ browser_screenshot() ← verifikasi berhasil login
+
+"Isi form registrasi di example.com"
+→ browser_open(url="https://example.com/register")
+→ browser_get_content(content_type="all_inputs") ← analisis form dulu
+→ browser_type + browser_select + browser_click
+→ browser_screenshot() ← konfirmasi
+```
+
+## 💡 Contoh Penggunaan UI Widgets
+
+```
+# AI meminta user memilih sebelum lanjut:
+→ ui_single_choice(options=["assembleDebug","assembleRelease","test"])
+→ ui_confirm(question="Yakin jalankan build release?", warning="Akan upload ke Play Store")
+→ ui_progress(steps=[{name:"Build",status:"active"}, {name:"Sign",status:"pending"}])
 ```
 
 ---
@@ -76,57 +107,23 @@ kimi mcp add --transport stdio node /path/to/android-expert-mcp/build/index.js
 ```
 android-expert-mcp/
 ├── src/
-│   ├── index.ts              # Server bootstrap & transport setup
-│   ├── utils.ts              # Shared utilities (exec, file ops, formatters)
+│   ├── index.ts              # Server bootstrap (v2: 46 tools)
+│   ├── utils.ts              # Shared utilities
 │   └── tools/
-│       ├── architecture.ts   # File system & documentation tools
-│       ├── android.ts        # Gradle, ADB, Kotlin analysis tools
-│       ├── scraping.ts       # Puppeteer web scraping tools
-│       └── audit.ts          # Lighthouse audit & screenshot tools
-├── build/                    # Compiled JS output (after npm run build)
-├── package.json
-├── tsconfig.json
-├── SETUP.md                  # Detailed setup guide
+│       ├── architecture.ts   # File & docs tools
+│       ├── android.ts        # Gradle, ADB, Kotlin
+│       ├── scraping.ts       # Puppeteer scraping
+│       ├── audit.ts          # Lighthouse & SEO
+│       ├── browser.ts        # 🆕 Session-based browser control
+│       └── interactive.ts    # 🆕 UI widgets & choices
+├── SETUP.md                  # Panduan setup lengkap
+├── TOOLS_REFERENCE.md        # Dokumentasi semua tools
+├── CHANGELOG.md              # Riwayat perubahan
 └── README.md
-```
-
----
-
-## 🛠️ Requirements
-
-- **Node.js** ≥ 18.0 (ESM support required)
-- **npm** ≥ 8.0
-- **ADB tools** — for Android device tools (install Android SDK Platform Tools)
-- **Linux/macOS** recommended (Windows via WSL2 also works)
-
----
-
-## ⚙️ Configuration
-
-The server uses stdio transport and requires no environment variables by default.
-
-For ADB tools to work:
-1. Install Android SDK Platform Tools
-2. Add `adb` to your system PATH
-3. Enable USB Debugging on your Android device
-
----
-
-## 🧪 Testing
-
-```bash
-# Build first
-npm run build
-
-# Run the server directly (will wait for MCP client connection via stdio)
-node build/index.js
-
-# Type-check without building
-npm run typecheck
 ```
 
 ---
 
 ## 📄 License
 
-MIT — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).
