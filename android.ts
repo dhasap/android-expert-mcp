@@ -16,6 +16,7 @@ import * as os from "os";
 import {
   runCommand,
   runStreamingCommand,
+  runAdbCommand,
   extractStackTrace,
   formatToolError,
   truncateOutput,
@@ -45,7 +46,7 @@ async function resolveGradlew(projectPath: string): Promise<string> {
 }
 
 async function checkAdbAvailable(): Promise<{ available: boolean; version?: string; error?: string }> {
-  const result = await runCommand("adb version", undefined, 10_000);
+  const result = await runAdbCommand("adb version", undefined, 10_000);
   if (result.exitCode !== 0) {
     return { available: false, error: result.stderr || "adb command not found" };
   }
@@ -53,7 +54,7 @@ async function checkAdbAvailable(): Promise<{ available: boolean; version?: stri
 }
 
 async function getConnectedDevices(): Promise<string[]> {
-  const result = await runCommand("adb devices", undefined, 10_000);
+  const result = await runAdbCommand("adb devices", undefined, 10_000);
   if (result.exitCode !== 0) return [];
 
   return result.stdout
@@ -217,7 +218,7 @@ export function registerAndroidTools(server: McpServer): void {
           };
         }
 
-        const result = await runCommand("adb devices -l", undefined, 15_000);
+        const result = await runAdbCommand("adb devices -l", undefined, 15_000);
         const devices = await getConnectedDevices();
 
         if (devices.length === 0) {
@@ -296,7 +297,7 @@ export function registerAndroidTools(server: McpServer): void {
         const localPath = path.join(os.tmpdir(), "ui_dump.xml");
 
         // Trigger uiautomator dump on device
-        const dumpResult = await runCommand(
+        const dumpResult = await runAdbCommand(
           `adb ${flag} shell uiautomator dump ${remotePath}`,
           undefined,
           30_000
@@ -316,7 +317,7 @@ export function registerAndroidTools(server: McpServer): void {
         }
 
         // Pull the dump file to local
-        const pullResult = await runCommand(
+        const pullResult = await runAdbCommand(
           `adb ${flag} pull ${remotePath} ${localPath}`,
           undefined,
           15_000
@@ -420,7 +421,7 @@ export function registerAndroidTools(server: McpServer): void {
         const flag = deviceFlag(device_serial);
 
         if (clear_before_capture) {
-          await runCommand(`adb ${flag} logcat -c`, undefined, 5_000);
+          await runAdbCommand(`adb ${flag} logcat -c`, undefined, 5_000);
         }
 
         // Build filter string
@@ -501,7 +502,7 @@ export function registerAndroidTools(server: McpServer): void {
         const flag = deviceFlag(device_serial);
 
         // Find APK path on device
-        const pathResult = await runCommand(
+        const pathResult = await runAdbCommand(
           `adb ${flag} shell pm path ${package_name}`,
           undefined,
           15_000
@@ -528,7 +529,7 @@ export function registerAndroidTools(server: McpServer): void {
         await ensureDir(resolvedOutputDir);
         const localPath = path.join(resolvedOutputDir, fileName);
 
-        const pullResult = await runCommand(
+        const pullResult = await runAdbCommand(
           `adb ${flag} pull "${remotePath}" "${localPath}"`,
           undefined,
           60_000
@@ -598,7 +599,7 @@ export function registerAndroidTools(server: McpServer): void {
         }
 
         const flag = deviceFlag(device_serial);
-        const result = await runCommand(
+        const result = await runAdbCommand(
           `adb ${flag} shell ${command}`,
           undefined,
           timeout_seconds * 1000

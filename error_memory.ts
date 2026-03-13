@@ -18,11 +18,10 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
-import { formatToolError, ensureDir } from "../utils.js";
+import { formatToolError, ensureDir, Mutex, atomicReadJson, atomicWriteJson } from "../utils.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -88,20 +87,20 @@ interface MemoryBank {
 const BANK_DIR = path.join(os.homedir(), ".android-expert-mcp");
 const BANK_FILE = path.join(BANK_DIR, "error_memory_bank.json");
 
+/** Module-level mutex — serialises all concurrent read/write operations. */
+const bankMutex = new Mutex();
+
+const BANK_DEFAULT: MemoryBank = {
+  version: "1.0",
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+  entries: [],
+  stats: { total_entries: 0, solved: 0, unsolved: 0, total_occurrences: 0 },
+};
+
 async function loadBank(): Promise<MemoryBank> {
   await ensureDir(BANK_DIR);
-  try {
-    const raw = await fs.readFile(BANK_FILE, "utf-8");
-    return JSON.parse(raw) as MemoryBank;
-  } catch {
-    return {
-      version: "1.0",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      entries: [],
-      stats: { total_entries: 0, solved: 0, unsolved: 0, total_occurrences: 0 },
-    };
-  }
+  return atomicReadJson<MemoryBank>(BANK_FILE, { ...BANK_DEFAULT, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
 }
 
 async function saveBank(bank: MemoryBank): Promise<void> {
@@ -113,7 +112,23 @@ async function saveBank(bank: MemoryBank): Promise<void> {
     total_occurrences: bank.entries.reduce((s, e) => s + e.occurrences, 0),
   };
   bank.updated_at = new Date().toISOString();
-  await fs.writeFile(BANK_FILE, JSON.stringify(bank, null, 2), "utf-8");
+  await atomicWriteJson(BANK_FILE, bank);
+}
+
+/**
+ * Acquire the mutex, run `fn` with the loaded bank, save, then release.
+ * Guarantees no concurrent writes ever race each other.
+ */
+async function withBank<T>(fn: (bank: MemoryBank) => Promise<T>): Promise<T> {
+  const release = await bankMutex.acquire();
+  try {
+    const bank = await loadBank();
+    const result = await fn(bank);
+    await saveBank(bank);
+    return result;
+  } finally {
+    release();
+  }
 }
 
 // ─── Error Fingerprinting ─────────────────────────────────────────────────────
@@ -358,81 +373,78 @@ export function registerErrorMemoryTools(server: McpServer): void {
     },
     async ({ raw_error, project_context, file_context, tags, force_new }) => {
       try {
-        const bank = await loadBank();
         const parsed = parseError(raw_error);
         const normalized = normalizeError(raw_error);
         const fingerprint = fingerprintError(normalized);
 
-        // Cari apakah error ini sudah ada
-        const existing = bank.entries.find((e) => e.fingerprint === fingerprint);
+        return await withBank(async (bank) => {
+          // Cari apakah error ini sudah ada
+          const existing = bank.entries.find((e) => e.fingerprint === fingerprint);
 
-        if (existing && !force_new) {
-          // Update occurrence
-          existing.occurrences++;
-          existing.last_seen = new Date().toISOString();
-          if (project_context && !existing.project_context?.includes(project_context)) {
-            existing.project_context =
-              (existing.project_context ? existing.project_context + ", " : "") + project_context;
+          if (existing && !force_new) {
+            existing.occurrences++;
+            existing.last_seen = new Date().toISOString();
+            if (project_context && !existing.project_context?.includes(project_context)) {
+              existing.project_context =
+                (existing.project_context ? existing.project_context + ", " : "") + project_context;
+            }
+            // withBank will call saveBank after this fn returns
+
+            const lines = [
+              `🔁 Error ini PERNAH TERJADI SEBELUMNYA (${existing.occurrences}x)`,
+              "═".repeat(55),
+              formatEntry(existing, true),
+            ];
+            if (existing.solutions.length === 0) {
+              lines.push("\n⚠️  Belum ada solusi tersimpan. Gunakan error_add_solution untuk menambahkan.");
+            }
+            return { content: [{ type: "text" as const, text: lines.join("\n") }] };
           }
-          await saveBank(bank);
+
+          // Cari yang mirip tapi bukan exact match
+          const similar = findSimilar(bank, normalized, fingerprint, 3).filter(
+            (e) => e.fingerprint !== fingerprint
+          );
+
+          // Buat entri baru
+          const newEntry: ErrorEntry = {
+            id: crypto.randomUUID(),
+            fingerprint,
+            title: parsed.title,
+            raw_error: raw_error.slice(0, 2000),
+            normalized_error: normalized,
+            tech_stack: parsed.tech_stack,
+            error_type: parsed.error_type,
+            file_context,
+            project_context,
+            status: "unsolved",
+            solutions: [],
+            tags: [...new Set([...tags, parsed.tech_stack, parsed.error_type.toLowerCase()])],
+            occurrences: 1,
+            first_seen: new Date().toISOString(),
+            last_seen: new Date().toISOString(),
+            related_ids: similar.map((s) => s.id),
+          };
+
+          bank.entries.push(newEntry);
 
           const lines = [
-            `🔁 Error ini PERNAH TERJADI SEBELUMNYA (${existing.occurrences}x)`,
+            `🆕 Error baru disimpan ke Memory Bank`,
             "═".repeat(55),
-            formatEntry(existing, true),
+            formatEntry(newEntry),
+            `\n🔑 ID: ${newEntry.id}`,
+            `   Gunakan ID ini untuk menambahkan solusi dengan error_add_solution`,
           ];
 
-          if (existing.solutions.length === 0) {
-            lines.push("\n⚠️  Belum ada solusi tersimpan. Gunakan error_add_solution untuk menambahkan.");
+          if (similar.length > 0) {
+            lines.push("\n🔍 Error serupa yang pernah ada:");
+            similar.forEach((s) => {
+              lines.push(`   ${formatEntry(s, true)}`);
+            });
           }
 
-          return { content: [{ type: "text", text: lines.join("\n") }] };
-        }
-
-        // Cari yang mirip tapi bukan exact match
-        const similar = findSimilar(bank, normalized, fingerprint, 3).filter(
-          (e) => e.fingerprint !== fingerprint
-        );
-
-        // Buat entri baru
-        const newEntry: ErrorEntry = {
-          id: crypto.randomUUID(),
-          fingerprint,
-          title: parsed.title,
-          raw_error: raw_error.slice(0, 2000),
-          normalized_error: normalized,
-          tech_stack: parsed.tech_stack,
-          error_type: parsed.error_type,
-          file_context,
-          project_context,
-          status: "unsolved",
-          solutions: [],
-          tags: [...new Set([...tags, parsed.tech_stack, parsed.error_type.toLowerCase()])],
-          occurrences: 1,
-          first_seen: new Date().toISOString(),
-          last_seen: new Date().toISOString(),
-          related_ids: similar.map((s) => s.id),
-        };
-
-        bank.entries.push(newEntry);
-        await saveBank(bank);
-
-        const lines = [
-          `🆕 Error baru disimpan ke Memory Bank`,
-          "═".repeat(55),
-          formatEntry(newEntry),
-          `\n🔑 ID: ${newEntry.id}`,
-          `   Gunakan ID ini untuk menambahkan solusi dengan error_add_solution`,
-        ];
-
-        if (similar.length > 0) {
-          lines.push("\n🔍 Error serupa yang pernah ada:");
-          similar.forEach((s) => {
-            lines.push(`   ${formatEntry(s, true)}`);
-          });
-        }
-
-        return { content: [{ type: "text", text: lines.join("\n") }] };
+          return { content: [{ type: "text" as const, text: lines.join("\n") }] };
+        }); // end withBank
       } catch (error) {
         return {
           content: [{ type: "text", text: formatToolError("error_remember", error) }],
@@ -478,7 +490,14 @@ export function registerErrorMemoryTools(server: McpServer): void {
     },
     async ({ query, tech_stack, status, tags, limit, verbose }) => {
       try {
-        const bank = await loadBank();
+        // error_search is read-only — acquire mutex to get a consistent snapshot
+        const release = await bankMutex.acquire();
+        let bank: MemoryBank;
+        try {
+          bank = await loadBank();
+        } finally {
+          release();
+        }
 
         if (bank.entries.length === 0) {
           return {
@@ -599,61 +618,58 @@ export function registerErrorMemoryTools(server: McpServer): void {
     },
     async ({ error_id, solution_description, code_snippet, worked, new_status, notes }) => {
       try {
-        const bank = await loadBank();
+        return await withBank(async (bank) => {
+          // Cari entry by ID (full atau 8 char prefix)
+          const entry = bank.entries.find(
+            (e) => e.id === error_id || e.id.startsWith(error_id)
+          );
 
-        // Cari entry by ID (full atau 8 char prefix)
-        const entry = bank.entries.find(
-          (e) => e.id === error_id || e.id.startsWith(error_id)
-        );
+          if (!entry) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text:
+                    `❌ Error dengan ID '${error_id}' tidak ditemukan.\n` +
+                    "Gunakan error_search untuk mencari ID yang benar.",
+                },
+              ],
+            };
+          }
 
-        if (!entry) {
+          const solution: Solution = {
+            id: crypto.randomUUID().slice(0, 8),
+            description: solution_description,
+            code_snippet,
+            worked,
+            added_at: new Date().toISOString(),
+            notes,
+          };
+
+          entry.solutions.push(solution);
+
+          if (new_status) {
+            entry.status = new_status;
+          } else if (worked) {
+            entry.status = "solved";
+          }
+
           return {
             content: [
               {
-                type: "text",
+                type: "text" as const,
                 text:
-                  `❌ Error dengan ID '${error_id}' tidak ditemukan.\n` +
-                  "Gunakan error_search untuk mencari ID yang benar.",
+                  `${worked ? "✅" : "❌"} Solusi ditambahkan!\n` +
+                  "═".repeat(55) +
+                  `\nError  : ${entry.title}\n` +
+                  `Status : ${entry.status}\n` +
+                  `Solusi : ${solution_description}\n` +
+                  (code_snippet ? `Kode   :\n\`\`\`\n${code_snippet.slice(0, 500)}\n\`\`\`` : "") +
+                  `\n\nTotal solusi untuk error ini: ${entry.solutions.length}`,
               },
             ],
           };
-        }
-
-        const solution: Solution = {
-          id: crypto.randomUUID().slice(0, 8),
-          description: solution_description,
-          code_snippet,
-          worked,
-          added_at: new Date().toISOString(),
-          notes,
-        };
-
-        entry.solutions.push(solution);
-
-        // Update status otomatis
-        if (new_status) {
-          entry.status = new_status;
-        } else if (worked) {
-          entry.status = "solved";
-        }
-
-        await saveBank(bank);
-
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                `${worked ? "✅" : "❌"} Solusi ditambahkan!\n` +
-                "═".repeat(55) +
-                `\nError  : ${entry.title}\n` +
-                `Status : ${entry.status}\n` +
-                `Solusi : ${solution_description}\n` +
-                (code_snippet ? `Kode   :\n\`\`\`\n${code_snippet.slice(0, 500)}\n\`\`\`` : "") +
-                `\n\nTotal solusi untuk error ini: ${entry.solutions.length}`,
-            },
-          ],
-        };
+        }); // end withBank
       } catch (error) {
         return {
           content: [{ type: "text", text: formatToolError("error_add_solution", error) }],
@@ -661,8 +677,6 @@ export function registerErrorMemoryTools(server: McpServer): void {
       }
     }
   );
-
-  // ── 4. error_auto_diagnose ────────────────────────────────────────────────
   server.tool(
     "error_auto_diagnose",
     "Analisis error baru secara otomatis: parse, cari di Memory Bank, " +
@@ -683,7 +697,6 @@ export function registerErrorMemoryTools(server: McpServer): void {
     },
     async ({ raw_error, project_context, also_remember }) => {
       try {
-        const bank = await loadBank();
         const parsed = parseError(raw_error);
         const normalized = normalizeError(raw_error);
         const fingerprint = fingerprintError(normalized);
@@ -700,59 +713,59 @@ export function registerErrorMemoryTools(server: McpServer): void {
           "",
         ];
 
-        // Cari di memory bank
-        const matches = findSimilar(bank, normalized, fingerprint, 5);
+        // Use withBank so any occurrence-update write is also atomic
+        await withBank(async (bank) => {
+          const matches = findSimilar(bank, normalized, fingerprint, 5);
 
-        if (matches.length > 0) {
-          const exactMatch = matches.find((m) => m.fingerprint === fingerprint);
+          if (matches.length > 0) {
+            const exactMatch = matches.find((m) => m.fingerprint === fingerprint);
 
-          if (exactMatch) {
-            lines.push(`🎯 EXACT MATCH — Error ini pernah terjadi ${exactMatch.occurrences}x!`);
-            lines.push("─".repeat(55));
-            lines.push(formatEntry(exactMatch, true));
+            if (exactMatch) {
+              lines.push(`🎯 EXACT MATCH — Error ini pernah terjadi ${exactMatch.occurrences}x!`);
+              lines.push("─".repeat(55));
+              lines.push(formatEntry(exactMatch, true));
 
-            // Update occurrence
-            if (also_remember) {
-              const entry = bank.entries.find((e) => e.id === exactMatch.id);
-              if (entry) {
-                entry.occurrences++;
-                entry.last_seen = new Date().toISOString();
-                await saveBank(bank);
+              if (also_remember) {
+                const entry = bank.entries.find((e) => e.id === exactMatch.id);
+                if (entry) {
+                  entry.occurrences++;
+                  entry.last_seen = new Date().toISOString();
+                  // saveBank called by withBank after this fn returns
+                }
               }
+            } else {
+              lines.push(`🔍 Ditemukan ${matches.length} error serupa:`);
+              matches.forEach((m, i) => {
+                lines.push(`\n${i + 1}. Similarity: ${Math.round(m.match_score * 100)}%`);
+                lines.push(formatEntry(m, true));
+              });
             }
           } else {
-            lines.push(`🔍 Ditemukan ${matches.length} error serupa:`);
-            matches.forEach((m, i) => {
-              lines.push(`\n${i + 1}. Similarity: ${Math.round(m.match_score * 100)}%`);
-              lines.push(formatEntry(m, true));
-            });
-          }
-        } else {
-          lines.push("🆕 Error baru — belum ada di Memory Bank.");
+            lines.push("🆕 Error baru — belum ada di Memory Bank.");
 
-          if (also_remember) {
-            const newEntry: ErrorEntry = {
-              id: crypto.randomUUID(),
-              fingerprint,
-              title: parsed.title,
-              raw_error: raw_error.slice(0, 2000),
-              normalized_error: normalized,
-              tech_stack: parsed.tech_stack,
-              error_type: parsed.error_type,
-              project_context,
-              status: "unsolved",
-              solutions: [],
-              tags: [parsed.tech_stack, parsed.error_type.toLowerCase()],
-              occurrences: 1,
-              first_seen: new Date().toISOString(),
-              last_seen: new Date().toISOString(),
-              related_ids: [],
-            };
-            bank.entries.push(newEntry);
-            await saveBank(bank);
-            lines.push(`✅ Disimpan ke Memory Bank. ID: ${newEntry.id.slice(0, 8)}`);
+            if (also_remember) {
+              const newEntry: ErrorEntry = {
+                id: crypto.randomUUID(),
+                fingerprint,
+                title: parsed.title,
+                raw_error: raw_error.slice(0, 2000),
+                normalized_error: normalized,
+                tech_stack: parsed.tech_stack,
+                error_type: parsed.error_type,
+                project_context,
+                status: "unsolved",
+                solutions: [],
+                tags: [parsed.tech_stack, parsed.error_type.toLowerCase()],
+                occurrences: 1,
+                first_seen: new Date().toISOString(),
+                last_seen: new Date().toISOString(),
+                related_ids: [],
+              };
+              bank.entries.push(newEntry);
+              lines.push(`✅ Disimpan ke Memory Bank. ID: ${newEntry.id.slice(0, 8)}`);
+            }
           }
-        }
+        }); // end withBank
 
         // Suggest debugging approach berdasarkan tech stack
         lines.push("\n💡 Suggested Debugging Approach:");
@@ -831,7 +844,14 @@ export function registerErrorMemoryTools(server: McpServer): void {
     },
     async ({ project_filter }) => {
       try {
-        const bank = await loadBank();
+        // read-only: acquire mutex for consistent snapshot, then release
+        const release = await bankMutex.acquire();
+        let bank: MemoryBank;
+        try {
+          bank = await loadBank();
+        } finally {
+          release();
+        }
 
         let entries = bank.entries;
         if (project_filter) {
@@ -923,7 +943,15 @@ export function registerErrorMemoryTools(server: McpServer): void {
     },
     async ({ output_path, filter_status }) => {
       try {
-        const bank = await loadBank();
+        // read-only: snapshot under mutex
+        const release = await bankMutex.acquire();
+        let bank: MemoryBank;
+        try {
+          bank = await loadBank();
+        } finally {
+          release();
+        }
+
         const toExport = {
           ...bank,
           entries:
@@ -936,7 +964,7 @@ export function registerErrorMemoryTools(server: McpServer): void {
         const outPath =
           output_path ??
           path.join(os.homedir(), `error_bank_export_${ts}.json`);
-        await fs.writeFile(outPath, JSON.stringify(toExport, null, 2), "utf-8");
+        await atomicWriteJson(outPath, toExport);
 
         return {
           content: [

@@ -31,6 +31,21 @@ interface InteractionSession {
 
 const interactionStore = new Map<string, InteractionSession>();
 
+/**
+ * TTL-based cleanup — purge sessions older than 60 minutes.
+ * Runs every 15 minutes.  `.unref()` ensures the timer never prevents
+ * the Node.js process from exiting cleanly.
+ */
+const INTERACTION_TTL_MS = 60 * 60 * 1000; // 60 minutes
+setInterval(() => {
+  const cutoff = Date.now() - INTERACTION_TTL_MS;
+  for (const [id, session] of interactionStore.entries()) {
+    if (session.createdAt.getTime() < cutoff) {
+      interactionStore.delete(id);
+    }
+  }
+}, 15 * 60 * 1000).unref();
+
 function generateId(): string {
   return `ui_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 }

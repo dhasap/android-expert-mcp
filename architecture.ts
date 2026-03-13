@@ -14,6 +14,7 @@ import {
   safeReadFile,
   ensureDir,
   formatToolError,
+  isSafePath,
 } from "../utils.js";
 
 export function registerArchitectureTools(server: McpServer): void {
@@ -88,6 +89,18 @@ export function registerArchitectureTools(server: McpServer): void {
     async ({ file_path, max_size_kb }) => {
       try {
         const resolvedPath = path.resolve(file_path);
+
+        // ── Path safety check ────────────────────────────────────────────
+        const safety = isSafePath(resolvedPath);
+        if (!safety.safe) {
+          return {
+            content: [{
+              type: "text",
+              text: `🚫 read_file blocked: ${safety.reason}`,
+            }],
+          };
+        }
+
         const { content, truncated } = await safeReadFile(
           resolvedPath,
           max_size_kb * 1024
@@ -115,7 +128,8 @@ export function registerArchitectureTools(server: McpServer): void {
     "write_file",
     "Creates a new file or completely overwrites an existing file with provided content. " +
       "Automatically creates parent directories if they don't exist. " +
-      "Ideal for creating architecture docs, algorithm write-ups, or code files.",
+      "Ideal for creating architecture docs, algorithm write-ups, or code files. " +
+      "Blocked from writing to system directories (/etc, /var, ~/.ssh, etc.).",
     {
       file_path: z
         .string()
@@ -125,10 +139,29 @@ export function registerArchitectureTools(server: McpServer): void {
         .boolean()
         .default(true)
         .describe("Auto-create parent directories if missing (default: true)"),
+      restrict_to_cwd: z
+        .boolean()
+        .default(false)
+        .describe(
+          "If true, only allow writing inside the current working directory " +
+            "(extra safety for automated pipelines). Default: false."
+        ),
     },
-    async ({ file_path, content, create_dirs }) => {
+    async ({ file_path, content, create_dirs, restrict_to_cwd }) => {
       try {
         const resolvedPath = path.resolve(file_path);
+        const allowedRoot = restrict_to_cwd ? process.cwd() : undefined;
+
+        // ── Path safety check ────────────────────────────────────────────
+        const safety = isSafePath(resolvedPath, allowedRoot);
+        if (!safety.safe) {
+          return {
+            content: [{
+              type: "text",
+              text: `🚫 write_file blocked: ${safety.reason}`,
+            }],
+          };
+        }
 
         if (create_dirs) {
           await ensureDir(path.dirname(resolvedPath));
@@ -144,8 +177,8 @@ export function registerArchitectureTools(server: McpServer): void {
               type: "text",
               text:
                 `✅ File written successfully.\n` +
-                `   Path: ${resolvedPath}\n` +
-                `   Size: ${sizeKb} KB\n` +
+                `   Path : ${resolvedPath}\n` +
+                `   Size : ${sizeKb} KB\n` +
                 `   Lines: ${content.split("\n").length}`,
             },
           ],
@@ -182,6 +215,18 @@ export function registerArchitectureTools(server: McpServer): void {
     async ({ file_path, search_text, replace_text, replace_all }) => {
       try {
         const resolvedPath = path.resolve(file_path);
+
+        // ── Path safety check ────────────────────────────────────────────
+        const safety = isSafePath(resolvedPath);
+        if (!safety.safe) {
+          return {
+            content: [{
+              type: "text",
+              text: `🚫 edit_file blocked: ${safety.reason}`,
+            }],
+          };
+        }
+
         const { content } = await safeReadFile(resolvedPath);
 
         if (!content.includes(search_text)) {

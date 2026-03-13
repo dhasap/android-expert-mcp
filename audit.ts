@@ -15,7 +15,7 @@ import { z } from "zod";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
-import { formatToolError, ensureDir, truncateOutput } from "../utils.js";
+import { formatToolError, ensureDir, truncateOutput, puppeteerSemaphore } from "../utils.js";
 
 // Lazy-load Puppeteer and Lighthouse to keep startup fast
 let puppeteerModule: typeof import("puppeteer") | null = null;
@@ -232,6 +232,7 @@ export function registerAuditTools(server: McpServer): void {
     },
     async ({ url, output_path, full_page, device, wait_seconds, timeout_seconds }) => {
       let browser: import("puppeteer").Browser | null = null;
+      let releaseSemaphore: (() => void) | null = null;
 
       try {
         const puppeteer = await getPuppeteer();
@@ -243,6 +244,7 @@ export function registerAuditTools(server: McpServer): void {
         };
         const viewport = viewports[device];
 
+        releaseSemaphore = await puppeteerSemaphore.acquire();
         browser = await puppeteer.launch({
           headless: true,
           args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
@@ -305,6 +307,7 @@ export function registerAuditTools(server: McpServer): void {
         };
       } finally {
         if (browser) await browser.close().catch(() => null);
+        releaseSemaphore?.();
       }
     }
   );
@@ -343,11 +346,13 @@ export function registerAuditTools(server: McpServer): void {
     },
     async ({ url, categories, device, output_dir, timeout_seconds }) => {
       let browser: import("puppeteer").Browser | null = null;
+      let releaseSemaphore: (() => void) | null = null;
 
       try {
         // Dynamic import of lighthouse (ESM)
         const puppeteer = await getPuppeteer();
 
+        releaseSemaphore = await puppeteerSemaphore.acquire();
         browser = await puppeteer.launch({
           headless: true,
           args: [
@@ -462,6 +467,7 @@ export function registerAuditTools(server: McpServer): void {
         };
       } finally {
         if (browser) await browser.close().catch(() => null);
+        releaseSemaphore?.();
       }
     }
   );
@@ -573,10 +579,12 @@ export function registerAuditTools(server: McpServer): void {
     },
     async ({ url, viewports, timeout_seconds }) => {
       let browser: import("puppeteer").Browser | null = null;
+      let releaseSemaphore: (() => void) | null = null;
 
       try {
         const puppeteer = await getPuppeteer();
 
+        releaseSemaphore = await puppeteerSemaphore.acquire();
         browser = await puppeteer.launch({
           headless: true,
           args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
@@ -693,6 +701,7 @@ export function registerAuditTools(server: McpServer): void {
         };
       } finally {
         if (browser) await browser.close().catch(() => null);
+        releaseSemaphore?.();
       }
     }
   );
@@ -709,10 +718,12 @@ export function registerAuditTools(server: McpServer): void {
     },
     async ({ url, timeout_seconds }) => {
       let browser: import("puppeteer").Browser | null = null;
+      let releaseSemaphore: (() => void) | null = null;
 
       try {
         const puppeteer = await getPuppeteer();
 
+        releaseSemaphore = await puppeteerSemaphore.acquire();
         browser = await puppeteer.launch({
           headless: true,
           args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
@@ -866,6 +877,7 @@ export function registerAuditTools(server: McpServer): void {
         };
       } finally {
         if (browser) await browser.close().catch(() => null);
+        releaseSemaphore?.();
       }
     }
   );

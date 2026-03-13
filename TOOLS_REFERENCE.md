@@ -1,60 +1,52 @@
-# 🔧 Tools Reference — Android Expert MCP Server
+# 🔧 Tools Reference — Android Expert MCP Server v5.0
 
-Dokumentasi lengkap semua tools yang tersedia, parameter input, dan contoh penggunaan.
+Dokumentasi lengkap 97 tools di 12 kategori.
 
 ---
 
-## 📂 Kategori 1: Architecture & Planning Tools
+## 📂 Kategori 1: Architecture & Planning Tools (6 tools)
 
 ### `read_project_structure`
-Membaca dan menampilkan struktur direktori proyek dalam bentuk tree.
+Membaca struktur direktori dalam bentuk tree. Auto-skip `node_modules`, `.git`, `.gradle`, `build`.
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
-| `project_path` | string | *required* | Path absolut/relatif ke root proyek |
-| `max_depth` | number | `5` | Kedalaman maksimum traversal (1–10) |
-
-**Contoh penggunaan:**
-```
-"Tolong baca struktur proyek saya di /home/user/MyAndroidApp"
-```
-
-**Output:** Tree direktori dengan ikon 📁/📄, otomatis mengabaikan `node_modules`, `.git`, `.gradle`, `build`.
+| `project_path` | string | *required* | Path ke root proyek |
+| `max_depth` | number | `5` | Kedalaman maksimum (1–10) |
 
 ---
 
 ### `read_file`
-Membaca konten file apapun dengan perlindungan ukuran.
+Membaca konten file dengan proteksi path traversal dan batas ukuran.
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
 | `file_path` | string | *required* | Path ke file |
-| `max_size_kb` | number | `1024` | Batas ukuran dalam KB (1–10240) |
+| `max_size_kb` | number | `1024` | Batas ukuran KB (1–10240) |
+
+> 🔒 Diproteksi `isSafePath()` — blokir `/etc`, `~/.ssh`, `.aws`, dll.
 
 ---
 
 ### `write_file`
-Membuat file baru atau overwrite file yang ada.
+Membuat atau overwrite file. Bisa dibatasi ke CWD saja.
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
-| `file_path` | string | *required* | Path output file |
-| `content` | string | *required* | Konten yang akan ditulis |
+| `file_path` | string | *required* | Path output |
+| `content` | string | *required* | Konten file |
 | `create_dirs` | boolean | `true` | Auto-buat parent directory |
+| `restrict_to_cwd` | boolean | `false` | Larang write di luar CWD |
 
 ---
 
 ### `edit_file`
 Edit file secara surgical dengan find-and-replace.
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
-| `file_path` | string | *required* | Path file yang akan diedit |
-| `search_text` | string | *required* | Teks yang akan diganti (exact match) |
+| `file_path` | string | *required* | Path file |
+| `search_text` | string | *required* | Teks yang dicari |
 | `replace_text` | string | *required* | Teks pengganti |
 | `replace_all` | boolean | `false` | Ganti semua kemunculan |
 
@@ -63,325 +55,634 @@ Edit file secara surgical dengan find-and-replace.
 ### `create_architecture_doc`
 Generate dokumentasi arsitektur Markdown terstruktur.
 
-**Input:**
 | Parameter | Tipe | Deskripsi |
 |-----------|------|-----------|
 | `output_path` | string | Path file .md output |
 | `project_name` | string | Nama proyek |
 | `overview` | string | Deskripsi high-level |
-| `tech_stack` | string[] | Daftar teknologi |
-| `modules` | object[] | Modul dengan nama, deskripsi, tanggung jawab |
+| `tech_stack` | string[] | Teknologi yang dipakai |
+| `modules` | object[] | Modul: `{name, description, responsibilities}` |
 | `data_flow` | string | Deskripsi alur data |
-| `additional_notes` | string? | Catatan tambahan (opsional) |
+| `additional_notes` | string? | Catatan tambahan |
 
 ---
 
 ### `list_files`
 Daftar file dalam direktori dengan filter ekstensi.
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
-| `dir_path` | string | *required* | Path direktori |
-| `extension` | string? | - | Filter ekstensi, misal `.kt`, `.xml` |
-| `recursive` | boolean | `false` | List rekursif |
+| `directory` | string | *required* | Path direktori |
+| `extensions` | string[] | `[]` | Filter ekstensi, misal `[".kt", ".xml"]` |
+| `recursive` | boolean | `false` | Rekursif ke subdirektori |
 
 ---
 
-## 📱 Kategori 2: Android/Kotlin/ADB Tools
+## 📱 Kategori 2: Android/Kotlin/ADB Tools (8 tools)
+
+Semua perintah ADB dijalankan via `runAdbCommand` — dilindungi global ADB mutex.
 
 ### `run_gradle_task`
-Eksekusi Gradle task dengan ekstraksi otomatis stack trace saat gagal.
+Jalankan Gradle task dengan streaming output dan ekstraksi stack trace otomatis.
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
-| `project_path` | string | *required* | Root proyek Android (tempat gradlew) |
-| `task` | string | *required* | Task Gradle, misal `assembleDebug`, `test` |
-| `extra_args` | string? | - | Flag tambahan, misal `--stacktrace --info` |
-| `timeout_seconds` | number | `300` | Timeout (30–1800 detik) |
-
-**Contoh tasks:**
-```
-assembleDebug          # Build APK debug
-assembleRelease        # Build APK release
-test                   # Semua unit test
-testDebugUnitTest      # Unit test untuk variant debug
-lint                   # Lint check
-clean                  # Bersihkan build artifacts
-:app:dependencies      # Tampilkan dependency tree
-```
+| `project_path` | string | *required* | Root proyek Android |
+| `task` | string | *required* | Task Gradle. Contoh: `assembleDebug`, `test` |
+| `extra_args` | string[] | `[]` | Argumen tambahan. Contoh: `["--stacktrace"]` |
 
 ---
 
 ### `read_build_log`
-Parse file log build dan ekstrak error/stack trace.
+Parse log build Gradle dan ringkas error/warning penting.
 
-**Input:**
-| Parameter | Tipe | Default | Deskripsi |
-|-----------|------|---------|-----------|
-| `log_path` | string | *required* | Path ke file log |
-| `extract_only_errors` | boolean | `true` | Hanya tampilkan error (bukan full log) |
+| Parameter | Tipe | Deskripsi |
+|-----------|------|-----------|
+| `log_path` | string | Path file log build |
 
 ---
 
 ### `adb_list_devices`
-List semua device/emulator Android yang terkoneksi.
+Tampilkan semua perangkat ADB yang terhubung (USB + wireless).
 
-**Input:** Tidak ada parameter.
+_(Tidak ada parameter)_
 
 ---
 
 ### `adb_dump_ui`
-Dump hierarki UI dari device Android menggunakan `uiautomator`.
+Dump UI hierarchy dari layar aktif ke file XML lokal.
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
-| `device_serial` | string? | - | Serial device ADB (kosongkan jika hanya 1 device) |
-| `include_invisible` | boolean | `false` | Sertakan elemen tidak terlihat |
-
-**Output:** XML hierarki UI dengan semua elemen, bounds, resource ID, text, class name.
+| `output_path` | string | `/tmp/ui_dump.xml` | Path output XML |
+| `device_serial` | string? | — | Serial device jika lebih dari satu |
 
 ---
 
 ### `adb_read_logcat`
-Capture output logcat dengan filter.
+Baca log ADB dengan filter opsional.
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
-| `device_serial` | string? | - | Serial device |
-| `duration_seconds` | number | `5` | Durasi capture (1–60 detik) |
-| `filter_tag` | string? | - | Filter by tag, misal `MainActivity` |
-| `package_name` | string? | - | Filter by package, misal `com.example.app` |
-| `level` | enum | `W` | Level minimum: V/D/I/W/E/F |
-| `clear_before_capture` | boolean | `true` | Bersihkan buffer sebelum capture |
+| `filter` | string | `"*:W"` | Filter logcat. Contoh: `"MyTag:D *:S"` |
+| `lines` | number | `100` | Jumlah baris terakhir |
+| `device_serial` | string? | — | Serial device |
 
 ---
 
 ### `adb_extract_apk`
-Ekstrak APK dari device yang terkoneksi.
+Ekstrak APK dari perangkat ke sistem lokal.
 
-**Input:**
-| Parameter | Tipe | Default | Deskripsi |
-|-----------|------|---------|-----------|
-| `package_name` | string | *required* | Package name, misal `com.example.app` |
-| `output_dir` | string | `./apk_extracts` | Direktori output lokal |
-| `device_serial` | string? | - | Serial device |
+| Parameter | Tipe | Deskripsi |
+|-----------|------|-----------|
+| `package_name` | string | Package app. Contoh: `com.example.myapp` |
+| `output_dir` | string | Direktori output |
+| `device_serial` | string? | Serial device |
 
 ---
 
 ### `adb_run_shell`
-Jalankan perintah shell arbitrary di device Android.
+Jalankan perintah ADB shell arbitrary.
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
-| `command` | string | *required* | Shell command, misal `dumpsys battery` |
-| `device_serial` | string? | - | Serial device |
-| `timeout_seconds` | number | `15` | Timeout (1–60 detik) |
-
-**Contoh commands:**
-```bash
-ls /sdcard/                           # List file di storage
-dumpsys battery                       # Info baterai
-dumpsys activity                      # Info activity
-am start -n com.pkg/.MainActivity     # Launch activity
-pm list packages                      # List installed packages
-settings get secure android_id        # Get Android ID
-```
+| `command` | string | *required* | Shell command |
+| `device_serial` | string? | — | Serial device |
+| `timeout_seconds` | number | `30` | Timeout (5–120) |
 
 ---
 
 ### `analyze_kotlin_file`
-Analisis struktural file Kotlin: classes, functions, coroutines, code smells.
+Analisis file Kotlin: ekstrak class, function, import, anti-pattern.
 
-**Input:**
 | Parameter | Tipe | Deskripsi |
 |-----------|------|-----------|
 | `file_path` | string | Path ke file .kt |
 
-**Output:** Package name, classes, functions (max 30), coroutine usages, code smell detection.
-
 ---
 
-## 🕷️ Kategori 3: Web Scraping & DOM Tools
+## 🕷️ Kategori 3: Web Scraping & DOM Tools (4 tools)
+
+Semua tool menggunakan `puppeteerSemaphore` — max 2 Chromium concurrent.
 
 ### `scrape_page_html`
-Ambil HTML halaman setelah JavaScript dieksekusi (fully rendered).
+Scrape HTML penuh dari halaman web (termasuk konten dinamis JavaScript).
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
-| `url` | string | *required* | URL target (https://) |
-| `wait_for` | enum | `networkidle2` | Kondisi wait: load/domcontentloaded/networkidle0/networkidle2 |
-| `wait_selector` | string? | - | Tunggu CSS selector muncul |
-| `stealth_mode` | boolean | `true` | Aktifkan anti-bot bypass |
-| `timeout_seconds` | number | `30` | Timeout (5–120 detik) |
-| `scroll_to_bottom` | boolean | `false` | Scroll untuk trigger lazy-load content |
+| `url` | string | *required* | URL yang di-scrape |
+| `wait_for_selector` | string? | — | Tunggu selector sebelum ambil HTML |
+| `timeout_ms` | number | `30000` | Timeout muat halaman |
 
 ---
 
 ### `extract_dom_structure`
-Ekstrak ringkasan terstruktur DOM: headings, links, images, forms, meta.
+Ekstrak struktur DOM: tag, class, ID, teks — tanpa noise HTML mentah.
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
 | `url` | string | *required* | URL target |
-| `include_links` | boolean | `true` | Sertakan semua hyperlink |
-| `include_images` | boolean | `true` | Sertakan data gambar |
-| `include_forms` | boolean | `true` | Sertakan struktur form |
-| `include_meta` | boolean | `true` | Sertakan meta tags & OG data |
-| `include_text` | boolean | `true` | Sertakan teks utama (tanpa HTML) |
-| `stealth_mode` | boolean | `true` | Anti-bot mode |
-| `timeout_seconds` | number | `30` | Timeout |
+| `selector` | string | `"body"` | Root selector untuk ekstraksi |
+| `depth` | number | `3` | Kedalaman DOM (1–10) |
 
 ---
 
 ### `execute_js_on_page`
-Eksekusi JavaScript kustom di halaman dan kembalikan hasilnya.
+Eksekusi JavaScript di halaman dan return hasilnya.
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
 | `url` | string | *required* | URL target |
-| `js_code` | string | *required* | Kode JS yang dieksekusi |
-| `wait_for_selector` | string? | - | Tunggu selector sebelum eksekusi |
-| `stealth_mode` | boolean | `true` | Anti-bot mode |
-| `timeout_seconds` | number | `30` | Timeout |
-
-**Contoh js_code:**
-```javascript
-// Hitung produk
-return document.querySelectorAll('.product-item').length
-
-// Ekstrak semua harga
-return Array.from(document.querySelectorAll('.price')).map(el => el.textContent.trim())
-
-// Ambil data dari window object
-return window.__NEXT_DATA__
-```
+| `script` | string | *required* | JavaScript yang dieksekusi |
+| `wait_for_load` | boolean | `true` | Tunggu halaman load sempurna |
 
 ---
 
 ### `monitor_network_requests`
-Monitor semua network request saat halaman dimuat (untuk reverse-engineering API).
+Monitor semua request network yang dibuat halaman (XHR, fetch, resource).
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
 | `url` | string | *required* | URL target |
-| `filter_type` | enum | `xhr` | Filter: all/xhr/fetch/document/script/stylesheet/image |
-| `timeout_seconds` | number | `15` | Timeout |
-| `stealth_mode` | boolean | `true` | Anti-bot mode |
+| `filter_type` | string | `"all"` | `xhr`, `fetch`, `document`, `all` |
+| `timeout_ms` | number | `15000` | Waktu monitoring |
 
 ---
 
-## 🔍 Kategori 4: Website Review & Audit Tools
+## 🔍 Kategori 4: Website Review & Audit Tools (5 tools)
+
+Semua tool menggunakan `puppeteerSemaphore` — max 2 Chromium concurrent.
 
 ### `take_screenshot`
-Ambil screenshot full-page website.
+Ambil screenshot halaman web (desktop/mobile).
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
 | `url` | string | *required* | URL target |
-| `output_path` | string? | `/tmp/mcp-screenshots/` | Path output PNG |
-| `full_page` | boolean | `true` | Screenshot seluruh halaman |
-| `device` | enum | `desktop` | Viewport: desktop/mobile/tablet |
-| `wait_seconds` | number | `2` | Tunggu X detik setelah load |
-| `timeout_seconds` | number | `30` | Timeout |
-
-**Viewport sizes:**
-- `desktop`: 1920×1080
-- `mobile`: 390×844 (iPhone 14 Pro)
-- `tablet`: 768×1024
+| `output_path` | string? | `/tmp/mcp-screenshots/` | Path simpan PNG |
+| `full_page` | boolean | `true` | Capture halaman penuh |
+| `mobile` | boolean | `false` | Mode viewport mobile |
+| `width` | number | `1280` | Lebar viewport px |
 
 ---
 
 ### `run_lighthouse_audit`
-Jalankan audit Lighthouse lengkap (Performance, Accessibility, SEO, Best Practices).
+Audit lengkap Lighthouse: performance, accessibility, best practices, SEO.
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
 | `url` | string | *required* | URL target |
-| `categories` | string[] | semua | Kategori audit |
-| `device` | enum | `mobile` | mobile/desktop |
-| `output_dir` | string? | `/tmp/mcp-audits/` | Direktori simpan JSON report |
-| `timeout_seconds` | number | `120` | Timeout (30–300 detik) |
-
-**Output:** Skor per kategori, Core Web Vitals (LCP, CLS, TBT, FCP), issues kritis, opportunities, rekomendasi.
+| `categories` | string[] | semua | `performance`, `accessibility`, `best-practices`, `seo` |
+| `mobile` | boolean | `false` | Mode mobile |
+| `output_path` | string? | `/tmp/mcp-audits/` | Simpan laporan JSON |
 
 ---
 
 ### `parse_audit_report`
-Parse file JSON Lighthouse yang sudah tersimpan menjadi ringkasan.
+Parse laporan Lighthouse JSON yang sudah ada menjadi ringkasan.
 
-**Input:**
-| Parameter | Tipe | Default | Deskripsi |
-|-----------|------|---------|-----------|
-| `report_path` | string | *required* | Path ke file JSON Lighthouse |
-| `focus` | enum | `all` | Focus: all/performance/accessibility/seo/best-practices/opportunities |
+| Parameter | Tipe | Deskripsi |
+|-----------|------|-----------|
+| `report_path` | string | Path ke file JSON Lighthouse |
 
 ---
 
 ### `check_mobile_responsiveness`
-Cek responsivitas di multiple viewport sizes.
+Cek tampilan website di beberapa breakpoint mobile sekaligus.
 
-**Input:**
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
 | `url` | string | *required* | URL target |
-| `viewports` | object[] | 5 preset | Custom viewport list |
-| `timeout_seconds` | number | `30` | Timeout |
-
-**Deteksi otomatis:**
-- Horizontal overflow/scroll
-- Missing meta viewport
-- Teks terlalu kecil (< 12px)
-- Touch targets terlalu kecil (< 44×44px)
+| `viewports` | object[]? | 4 preset | Array `{width, height, label}` |
 
 ---
 
 ### `extract_seo_data`
-Analisis SEO mendalam suatu halaman web.
+Ekstrak semua data SEO: meta tags, OpenGraph, structured data, heading hierarchy.
 
-**Input:**
+| Parameter | Tipe | Deskripsi |
+|-----------|------|-----------|
+| `url` | string | URL target |
+
+---
+
+## 🖥️ Kategori 5: Interactive Browser Control (14 tools)
+
+Session persisten — buka sekali, gunakan berkali-kali. Max 5 sesi aktif (otomatis evict sesi idle terlama). Auto-cleanup 30 menit idle.
+
+### `browser_open`
+Buka browser dan navigasi ke URL. Buat session persisten.
+
 | Parameter | Tipe | Default | Deskripsi |
 |-----------|------|---------|-----------|
-| `url` | string | *required* | URL target |
-| `timeout_seconds` | number | `30` | Timeout |
+| `url` | string | *required* | URL awal |
+| `session_id` | string? | auto-generate | ID sesi (reuse untuk sesi lama) |
+| `headless` | boolean | `true` | Mode headless |
+| `viewport_width` | number | `1280` | Lebar viewport |
+| `viewport_height` | number | `800` | Tinggi viewport |
 
-**Analisis meliputi:**
-- Title & meta description (panjang optimal)
-- Canonical URL, robots meta
-- Open Graph & Twitter Card tags
-- Struktur heading (H1–H3)
-- Images alt text
-- Internal vs external links
-- JSON-LD structured data
-- Word count
-- Lang attribute
+---
+
+### `browser_screenshot` / `browser_click` / `browser_type` / `browser_navigate` / `browser_scroll` / `browser_get_content` / `browser_wait` / `browser_select` / `browser_execute_script` / `browser_close` / `browser_list_sessions` / `browser_hover` / `browser_keyboard`
+
+Semua tool browser memerlukan `session_id` (kecuali `browser_list_sessions`). Dapatkan dari `browser_open`.
+
+| Tool | Parameter Utama |
+|------|-----------------|
+| `browser_screenshot` | `session_id`, `full_page?`, `output_path?` |
+| `browser_click` | `session_id`, `selector` |
+| `browser_type` | `session_id`, `selector`, `text`, `clear_first?` |
+| `browser_navigate` | `session_id`, `action` (goto/back/forward/reload/new_tab), `url?` |
+| `browser_scroll` | `session_id`, `direction` (up/down/top/bottom/to_element), `selector?`, `amount?` |
+| `browser_get_content` | `session_id`, `content_type` (html/text/links/inputs/all) |
+| `browser_wait` | `session_id`, `wait_type` (selector/network_idle/timeout), `value?` |
+| `browser_select` | `session_id`, `selector`, `value`, `action` (select/check/uncheck) |
+| `browser_execute_script` | `session_id`, `script` |
+| `browser_close` | `session_id` |
+| `browser_hover` | `session_id`, `selector` |
+| `browser_keyboard` | `session_id`, `key` (Enter/Tab/Escape/Ctrl+A/dll) |
+
+---
+
+## 🎨 Kategori 6: Interactive UI Widgets (9 tools)
+
+TTL 60 menit per interaksi. Semua tool menghasilkan output teks terformat untuk ditampilkan ke user.
+
+| Tool | Fungsi | Parameter Utama |
+|------|--------|-----------------|
+| `ui_single_choice` | Pilihan tunggal | `question`, `options[]` |
+| `ui_multi_choice` | Pilihan berganda | `question`, `options[]`, `min_selections?` |
+| `ui_confirm` | Konfirmasi ya/tidak | `question`, `warning?`, `context?` |
+| `ui_menu` | Menu berjenjang | `title`, `items[]` (nested) |
+| `ui_progress` | Progress tracker | `title`, `steps[]` ({name, status, detail?}) |
+| `ui_info_card` | Kartu info | `title`, `fields[]` ({key, value, icon?}) |
+| `ui_input_form` | Form multi-field | `title`, `fields[]` ({name, label, type, required?}) |
+| `ui_table` | Tabel ASCII | `title`, `headers[]`, `rows[][]` |
+| `ui_notification` | Notifikasi | `type` (success/error/warning/info/tip), `message`, `details?` |
+
+---
+
+## 🔥 Kategori 7: IDX Emulator + Firebase Test Lab (13 tools)
+
+Semua perintah ADB menggunakan `runAdbCommand` (global ADB mutex).
+
+| Tool | Fungsi |
+|------|--------|
+| `idx_check_environment` | Cek status IDX, ADB, emulator |
+| `idx_start_emulator` | Start/restart emulator di IDX |
+| `idx_connect_emulator` | Connect ADB ke emulator (ADB kill-server + restart otomatis) |
+| `idx_install_apk` | Install APK ke emulator |
+| `idx_launch_app` | Launch app di emulator |
+| `idx_emulator_screenshot` | Screenshot emulator |
+| `idx_emulator_ui_dump` | Dump UI hierarchy emulator |
+| `idx_get_device_info` | Info hardware emulator (model, SDK, RAM, storage) |
+| `idx_run_ui_test` | Jalankan UI test (Espresso/UIAutomator) |
+| `ftl_run_robo_test` | Firebase Test Lab — Robo test (auto-explore) |
+| `ftl_run_instrumented_test` | Firebase Test Lab — instrumented test |
+| `ftl_get_results` | Ambil hasil test dari FTL |
+| `ftl_list_devices` | List perangkat yang tersedia di FTL |
+
+---
+
+## 🧠 Kategori 8: Error Memory Bank (6 tools)
+
+Persistent cross-session error learning. Semua operasi file menggunakan Mutex (atomic writes).
+
+| Tool | Fungsi | Parameter Utama |
+|------|--------|-----------------|
+| `error_auto_diagnose` | Diagnosa error + cari solusi dari bank | `error_text`, `context?`, `tech_stack?` |
+| `error_remember` | Simpan error baru | `error_text`, `solution`, `tech_stack`, `tags?` |
+| `error_search` | Cari error mirip | `query`, `tech_stack?`, `limit?` |
+| `error_add_solution` | Tambah solusi ke error | `error_id`, `solution`, `notes?` |
+| `error_stats` | Statistik bank per tech stack | `tech_stack?` |
+| `error_export` | Export bank ke JSON | `output_path?` |
+
+---
+
+## 🏗️ Kategori 9: Project Scaffolding Engine (4 tools)
+
+| Tool | Template | Parameter Utama |
+|------|----------|-----------------|
+| `scaffold_android` | Android app (Compose, MVVM, Hilt, Room) | `project_path`, `package_name`, `app_name`, `min_sdk?`, `features?` |
+| `scaffold_telegram_bot` | Telegram bot (Node.js atau Python) | `project_path`, `bot_name`, `language`, `features?` |
+| `scaffold_chrome_extension` | Chrome Extension Manifest V3 | `project_path`, `extension_name`, `features?` |
+| `scaffold_node_api` | REST API (Express/Fastify + TypeScript) | `project_path`, `api_name`, `framework?`, `features?` |
+
+---
+
+## 🚀 Kategori 10: VPS & Deploy Manager (10 tools)
+
+SSH command menggunakan base64 encoding (tidak ada shell escaping issue). Secret di-mask otomatis di output error.
+
+| Tool | Fungsi | Parameter Utama |
+|------|--------|-----------------|
+| `vps_add_server` | Tambah profil server | `name`, `host`, `user`, `port?`, `ssh_key_path?`, `password?` |
+| `vps_list_servers` | Tampilkan server tersimpan | — |
+| `vps_exec` | Jalankan command di VPS | `server`, `command`, `timeout?` |
+| `vps_monitor` | Monitor CPU/RAM/disk/network | `server`, `metrics?` |
+| `vps_deploy` | Deploy files via rsync/scp | `server`, `local_path`, `remote_path`, `pre_commands?`, `post_commands?` |
+| `vps_logs` | Baca log journalctl/pm2/nginx | `server`, `service`, `lines?`, `since?` |
+| `vps_service` | Kelola pm2/systemd service | `server`, `action` (start/stop/restart/status), `service_name` |
+| `vps_turso` | Kelola Turso database | `action`, `sql?`, `database_url?`, `auth_token?` |
+| `vps_deploy_history` | Riwayat deploy | `server?`, `limit?` |
+| `vps_optimize` | Auto-optimize VPS | `server`, `optimizations?` |
+
+---
+
+## 📡 Kategori 11: Wireless ADB Debugging (8 tools)
+
+Debug dan scrape Android app **tanpa kabel USB** — via WiFi. Semua tool menggunakan `runAdbCommand` (global ADB mutex).
+
+### `adb_wifi_pair`
+Pair perangkat Android 11+ dengan kode 6 digit. Hanya perlu dilakukan SEKALI per perangkat.
+
+| Parameter | Tipe | Deskripsi |
+|-----------|------|-----------|
+| `pair_address` | string | `HOST:PORT` dari layar "Pair with pairing code". Contoh: `192.168.1.5:37891` |
+| `pairing_code` | string | Kode 6 digit dari layar HP. Contoh: `482931` |
+
+**Flow Android 11+:**
+```
+Settings → Developer Options → Wireless debugging → ON
+→ "Pair device with pairing code"
+→ Catat HOST:PORT dan 6-digit code
+→ adb_wifi_pair(pair_address, pairing_code)
+→ adb_wifi_connect(address dari halaman Wireless debugging)
+```
+
+---
+
+### `adb_wifi_connect`
+Hubungkan ke perangkat Android via wireless ADB.
+
+| Parameter | Tipe | Deskripsi |
+|-----------|------|-----------|
+| `address` | string | `IP:PORT`. Contoh: `192.168.1.5:5555` atau `192.168.1.5:45123` |
+
+---
+
+### `adb_wifi_enable`
+Aktifkan TCP/IP mode pada perangkat yang terhubung via USB (Android 10-).
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `port` | number | `5555` | Port TCP yang dibuka di device |
+| `device_serial` | string? | — | Serial USB device jika >1 perangkat |
+
+**Flow Android 10-:**
+```
+Sambung USB → aktifkan USB Debugging
+→ adb_wifi_enable(port=5555)
+→ Catat IP device dari output
+→ Cabut USB
+→ adb_wifi_connect(address="192.168.1.X:5555")
+```
+
+---
+
+### `adb_wifi_devices`
+Tampilkan semua perangkat wireless (TCP) yang aktif.
+
+_(Tidak ada parameter)_
+
+---
+
+### `adb_wifi_disconnect`
+Putuskan koneksi wireless ADB.
+
+| Parameter | Tipe | Deskripsi |
+|-----------|------|-----------|
+| `address` | string? | `IP:PORT`. Kosongkan untuk disconnect semua. |
+
+---
+
+### `adb_wifi_shell`
+Jalankan ADB shell command ke perangkat wireless.
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `address` | string | *required* | `IP:PORT` device |
+| `command` | string | *required* | Shell command. Contoh: `pm list packages -3`, `dumpsys activity top` |
+| `timeout_seconds` | number | `30` | Timeout (5–120) |
+
+**Contoh command berguna:**
+```bash
+pm list packages -3              # List app non-sistem
+am start -n com.app/.MainActivity  # Launch activity
+dumpsys activity top             # Info activity foreground
+input keyevent 4                 # Tekan tombol Back
+settings get secure android_id   # Baca Android ID
+```
+
+---
+
+### `adb_wifi_screenshot`
+Ambil screenshot layar device via WiFi ADB.
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `address` | string | *required* | `IP:PORT` device |
+| `output_path` | string? | `/tmp/mcp-emulator/wifi_ss_*.png` | Path simpan PNG |
+| `display_id` | number | `0` | ID display (0 = layar utama) |
+
+---
+
+### `adb_wifi_ui_dump`
+**Tool utama untuk scraping app Android native.** Dump UI hierarchy XML, ekstrak semua teks dan resource-ID yang tampil di layar.
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `address` | string | *required* | `IP:PORT` device |
+| `output_path` | string? | `/tmp/mcp-emulator/wifi_ui_*.xml` | Path simpan XML |
+| `include_raw_xml` | boolean | `false` | Sertakan raw XML dalam response |
+| `filter_package` | string? | — | Filter elemen dari package tertentu. Contoh: `com.tokopedia.tkpd` |
+
+**Output:** Summary jumlah node, daftar semua teks terdeteksi, daftar resource-ID unik.
+
+**Contoh alur scraping app:**
+```
+1. Buka app di HP
+2. adb_wifi_ui_dump → dapat semua teks & ID elemen di layar
+3. adb_wifi_shell(command="input tap 540 960") → tap elemen
+4. adb_wifi_screenshot → verifikasi state
+5. adb_wifi_ui_dump lagi → scrape halaman berikutnya
+```
+
+---
+
+## 🐙 Kategori 12: GitHub Integration (10 tools)
+
+Gunakan GitHub REST API v3. Default owner: **@dhasap**. Setup: `export GITHUB_TOKEN=ghp_...`
+
+### `github_repo_list`
+Tampilkan daftar repository GitHub.
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `owner` | string | `dhasap` | Username GitHub |
+| `type` | enum | `owner` | `all`, `owner`, `member`, `public`, `private` |
+| `sort` | enum | `updated` | `created`, `updated`, `pushed`, `full_name` |
+| `per_page` | number | `30` | Jumlah hasil (max 100) |
+
+---
+
+### `github_repo_info`
+Detail lengkap satu repository: statistik, branches, languages, topics, license.
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `repo` | string | *required* | Nama repo. Contoh: `android-expert-mcp` |
+| `owner` | string | `dhasap` | Owner repo |
+
+---
+
+### `github_repo_create`
+Buat repository GitHub baru. Memerlukan GITHUB_TOKEN.
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `name` | string | *required* | Nama repo baru |
+| `description` | string | `""` | Deskripsi |
+| `private` | boolean | `false` | Private repo |
+| `auto_init` | boolean | `true` | Inisialisasi dengan README |
+| `gitignore_template` | string? | — | `Android`, `Node`, `Python`, dll |
+| `license_template` | string? | — | `mit`, `apache-2.0`, `gpl-3.0` |
+
+---
+
+### `github_file_read`
+Baca konten file dari repository (mendukung semua branch/tag/SHA).
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `repo` | string | *required* | Nama repo |
+| `file_path` | string | *required* | Path file di repo. Contoh: `src/main/AndroidManifest.xml` |
+| `ref` | string | `HEAD` | Branch, tag, atau commit SHA |
+| `owner` | string | `dhasap` | Owner |
+
+---
+
+### `github_file_write`
+Buat atau update satu file di repository. Untuk update, sertakan `sha`.
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `repo` | string | *required* | Nama repo |
+| `file_path` | string | *required* | Path target. Contoh: `docs/GUIDE.md` |
+| `content` | string | *required* | Konten file |
+| `commit_message` | string | *required* | Pesan commit |
+| `sha` | string? | — | SHA file lama (wajib untuk UPDATE) — dari `github_file_read` |
+| `branch` | string | `main` | Target branch |
+| `owner` | string | `dhasap` | Owner |
+
+---
+
+### `github_issue_list`
+Tampilkan daftar issue dengan filter.
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `repo` | string | *required* | Nama repo |
+| `state` | enum | `open` | `open`, `closed`, `all` |
+| `labels` | string? | — | Filter label, pisah koma. Contoh: `bug,help wanted` |
+| `per_page` | number | `20` | Jumlah hasil |
+| `owner` | string | `dhasap` | Owner |
+
+---
+
+### `github_issue_create`
+Buat issue baru. Memerlukan GITHUB_TOKEN.
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `repo` | string | *required* | Nama repo |
+| `title` | string | *required* | Judul issue |
+| `body` | string | `""` | Deskripsi (Markdown) |
+| `labels` | string[] | `[]` | Label. Contoh: `["bug", "priority: high"]` |
+| `assignees` | string[] | `[]` | Username yang di-assign |
+| `owner` | string | `dhasap` | Owner |
+
+---
+
+### `github_pr_list`
+Tampilkan daftar Pull Request.
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `repo` | string | *required* | Nama repo |
+| `state` | enum | `open` | `open`, `closed`, `all` |
+| `per_page` | number | `15` | Jumlah hasil |
+| `owner` | string | `dhasap` | Owner |
+
+---
+
+### `github_commit_push`
+Push beberapa file dalam satu atomic commit via GitHub Tree API. **Tidak perlu git lokal.**
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `repo` | string | *required* | Nama repo |
+| `files` | object[] | *required* | Array `[{path, content}, ...]` |
+| `commit_message` | string | *required* | Pesan commit |
+| `branch` | string | `main` | Target branch |
+| `owner` | string | `dhasap` | Owner |
+
+**Contoh:**
+```json
+{
+  "repo": "my-android-app",
+  "files": [
+    {"path": "README.md", "content": "# My App"},
+    {"path": "app/src/main/res/values/strings.xml", "content": "<resources>..."}
+  ],
+  "commit_message": "chore: update README and strings"
+}
+```
+
+---
+
+### `github_release_create`
+Buat GitHub Release. Memerlukan GITHUB_TOKEN.
+
+| Parameter | Tipe | Default | Deskripsi |
+|-----------|------|---------|-----------|
+| `repo` | string | *required* | Nama repo |
+| `tag_name` | string | *required* | Tag. Contoh: `v1.2.0` |
+| `name` | string | *required* | Nama release. Contoh: `Release v1.2.0` |
+| `body` | string | `""` | Release notes (Markdown) |
+| `draft` | boolean | `false` | Simpan sebagai draft |
+| `prerelease` | boolean | `false` | Tandai sebagai pre-release |
+| `target_commitish` | string | `main` | Branch/SHA target |
+| `owner` | string | `dhasap` | Owner |
 
 ---
 
 ## 🔗 Integrasi dengan AI Agent
 
-Semua tools ini tersedia secara otomatis setelah MCP server didaftarkan. AI Agent Anda dapat memanggil tools ini dengan instruksi natural language. Contoh:
+### Alur Scraping App Android via Wireless
 
 ```
-"Audit website https://tokopedia.com dan berikan rekomendasi perbaikan performance"
-→ AI akan memanggil: run_lighthouse_audit + parse_audit_report
+"Scrape data produk dari app Tokopedia di HP saya via WiFi"
+→ adb_wifi_devices()                                    ← cek device
+→ adb_wifi_ui_dump(address, filter_package="com.tokopedia.tkpd")  ← dump layar
+→ adb_wifi_shell(address, command="input swipe 540 1600 540 400")  ← scroll
+→ adb_wifi_ui_dump lagi                                  ← scrape lebih banyak
+```
 
-"Debug kenapa build Gradle saya gagal di /home/user/MyApp"
-→ AI akan memanggil: run_gradle_task, lalu menganalisis stack trace
+### Alur GitHub: Scaffold → Commit → Release
 
-"Scrape semua harga produk dari https://shop.example.com/products"
-→ AI akan memanggil: scrape_page_html + execute_js_on_page
+```
+"Buat proyek Android baru dan push ke GitHub"
+→ scaffold_android(project_path="/tmp/MyApp", package_name="com.dhasap.myapp")
+→ github_repo_create(name="my-android-app", gitignore_template="Android")
+→ github_commit_push(repo="my-android-app", files=[...semua file scaffold])
+→ github_release_create(repo="my-android-app", tag_name="v0.1.0", name="Initial Release")
+```
 
-"Cek apakah website klien saya mobile-friendly"
-→ AI akan memanggil: check_mobile_responsiveness + take_screenshot (mobile)
+### Alur Debug Error Cross-Session
+
+```
+"App crash dengan NPE, ingat untuk nanti"
+→ error_auto_diagnose(error_text="NullPointerException at MainActivity.kt:42")
+→ error_remember(error_text, solution="Gunakan ?.let {}", tech_stack="kotlin")
 ```

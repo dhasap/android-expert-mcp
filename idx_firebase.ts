@@ -30,6 +30,7 @@ import * as path from "path";
 import * as os from "os";
 import {
   runCommand,
+  runAdbCommand,
   formatToolError,
   ensureDir,
   truncateOutput,
@@ -47,7 +48,7 @@ const IDX_ADB_HOST = "localhost";
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 async function isAdbAvailable(): Promise<boolean> {
-  const r = await runCommand("adb version", undefined, 5000);
+  const r = await runAdbCommand("adb version", undefined, 5000);
   return r.exitCode === 0;
 }
 
@@ -59,7 +60,7 @@ async function isGcloudAvailable(): Promise<boolean> {
 async function getConnectedDevicesList(): Promise<
   Array<{ serial: string; state: string; isEmulator: boolean }>
 > {
-  const r = await runCommand("adb devices -l", undefined, 10000);
+  const r = await runAdbCommand("adb devices -l", undefined, 10000);
   return r.stdout
     .split("\n")
     .slice(1)
@@ -224,7 +225,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           lines.push("🔗 Menghubungkan ke emulator...");
 
           for (const f of found) {
-            const connectResult = await runCommand(
+            const connectResult = await runAdbCommand(
               `adb connect ${f.address}`,
               undefined,
               10000
@@ -314,11 +315,11 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         ];
 
         // Kill server dulu lalu restart (sering fix masalah koneksi IDX)
-        await runCommand("adb kill-server", undefined, 5000);
+        await runAdbCommand("adb kill-server", undefined, 5000);
         await new Promise((r) => setTimeout(r, 1000));
-        await runCommand("adb start-server", undefined, 5000);
+        await runAdbCommand("adb start-server", undefined, 5000);
 
-        const connectResult = await runCommand(
+        const connectResult = await runAdbCommand(
           `adb connect ${address}`,
           undefined,
           15000
@@ -347,7 +348,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           let booted = false;
 
           while (Date.now() - bootStart < boot_timeout_seconds * 1000) {
-            const bootCheck = await runCommand(
+            const bootCheck = await runAdbCommand(
               `adb -s ${address} shell getprop sys.boot_completed`,
               undefined,
               10000
@@ -368,17 +369,17 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         }
 
         // Info device
-        const propResult = await runCommand(
+        const propResult = await runAdbCommand(
           `adb -s ${address} shell getprop ro.product.model`,
           undefined,
           5000
         );
-        const sdkResult = await runCommand(
+        const sdkResult = await runAdbCommand(
           `adb -s ${address} shell getprop ro.build.version.sdk`,
           undefined,
           5000
         );
-        const androidResult = await runCommand(
+        const androidResult = await runAdbCommand(
           `adb -s ${address} shell getprop ro.build.version.release`,
           undefined,
           5000
@@ -447,14 +448,14 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         // Parallel queries untuk speed
         const [model, android, sdk, mem, cpu, storage, uptime, display] =
           await Promise.all([
-            runCommand(`adb ${flag} shell getprop ro.product.model`, undefined, 5000),
-            runCommand(`adb ${flag} shell getprop ro.build.version.release`, undefined, 5000),
-            runCommand(`adb ${flag} shell getprop ro.build.version.sdk`, undefined, 5000),
-            runCommand(`adb ${flag} shell cat /proc/meminfo | head -5`, undefined, 5000),
-            runCommand(`adb ${flag} shell top -bn1 | head -5`, undefined, 5000),
-            runCommand(`adb ${flag} shell df /data | tail -1`, undefined, 5000),
-            runCommand(`adb ${flag} shell uptime`, undefined, 5000),
-            runCommand(
+            runAdbCommand(`adb ${flag} shell getprop ro.product.model`, undefined, 5000),
+            runAdbCommand(`adb ${flag} shell getprop ro.build.version.release`, undefined, 5000),
+            runAdbCommand(`adb ${flag} shell getprop ro.build.version.sdk`, undefined, 5000),
+            runAdbCommand(`adb ${flag} shell cat /proc/meminfo | head -5`, undefined, 5000),
+            runAdbCommand(`adb ${flag} shell top -bn1 | head -5`, undefined, 5000),
+            runAdbCommand(`adb ${flag} shell df /data | tail -1`, undefined, 5000),
+            runAdbCommand(`adb ${flag} shell uptime`, undefined, 5000),
+            runAdbCommand(
               `adb ${flag} shell dumpsys display | grep "mCurrentDisplayRect\\|DisplayWidth\\|DisplayHeight" | head -3`,
               undefined,
               5000
@@ -585,7 +586,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           "⏳ Installing...",
         ];
 
-        const installResult = await runCommand(
+        const installResult = await runAdbCommand(
           `adb ${flag} install ${flags} "${resolvedApk}"`,
           undefined,
           120000
@@ -621,7 +622,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
 
           if (launch_after && package_name) {
             lines.push("🚀 Launching aplikasi...");
-            const launchResult = await runCommand(
+            const launchResult = await runAdbCommand(
               `adb ${flag} shell monkey -p ${package_name} -c android.intent.category.LAUNCHER 1`,
               undefined,
               15000
@@ -1248,7 +1249,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         const remotePath = `/sdcard/screenshot_${timestamp}.png`;
 
         // Screencap via ADB
-        const capResult = await runCommand(
+        const capResult = await runAdbCommand(
           `adb ${flag} shell screencap -p -d ${display_id} ${remotePath}`,
           undefined,
           15000
@@ -1266,14 +1267,14 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         }
 
         // Pull ke lokal
-        const pullResult = await runCommand(
+        const pullResult = await runAdbCommand(
           `adb ${flag} pull ${remotePath} "${localPath}"`,
           undefined,
           15000
         );
 
         // Cleanup remote
-        await runCommand(`adb ${flag} shell rm ${remotePath}`, undefined, 5000);
+        await runAdbCommand(`adb ${flag} shell rm ${remotePath}`, undefined, 5000);
 
         if (pullResult.exitCode !== 0) {
           return {
@@ -1358,7 +1359,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         const localPath = path.join(os.tmpdir(), `ui_dump_${Date.now()}.xml`);
 
         // Dump UI
-        const dumpResult = await runCommand(
+        const dumpResult = await runAdbCommand(
           `adb ${flag} shell uiautomator dump --compressed ${remotePath}`,
           undefined,
           30000
@@ -1378,12 +1379,12 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         }
 
         // Pull XML
-        await runCommand(
+        await runAdbCommand(
           `adb ${flag} pull ${remotePath} "${localPath}"`,
           undefined,
           15000
         );
-        await runCommand(
+        await runAdbCommand(
           `adb ${flag} shell rm ${remotePath}`,
           undefined,
           5000
@@ -1589,18 +1590,18 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         if (action === "tap_by_text" || action === "tap_by_id") {
           // Ambil UI dump untuk cari koordinat
           const remotePath = `/sdcard/ui_tmp_${Date.now()}.xml`;
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} shell uiautomator dump --compressed ${remotePath}`,
             undefined,
             20000
           );
           const localTmp = path.join(os.tmpdir(), `ui_tmp_${Date.now()}.xml`);
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} pull ${remotePath} "${localTmp}"`,
             undefined,
             10000
           );
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} shell rm ${remotePath}`,
             undefined,
             5000
@@ -1671,17 +1672,17 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           await ensureDir(ssDir);
           const ssPath = path.join(ssDir, `tap_${Date.now()}.png`);
           const remoteSs = `/sdcard/ss_${Date.now()}.png`;
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} shell screencap -p ${remoteSs}`,
             undefined,
             10000
           );
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} pull ${remoteSs} "${ssPath}"`,
             undefined,
             10000
           );
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} shell rm ${remoteSs}`,
             undefined,
             5000
@@ -1761,7 +1762,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
 
         // Tap ke field jika koordinat atau resource_id diberikan
         if (tap_x !== undefined && tap_y !== undefined) {
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} shell input tap ${tap_x} ${tap_y}`,
             undefined,
             5000
@@ -1770,18 +1771,18 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         } else if (resource_id) {
           // Cari koordinat dari UI dump
           const remotePath = `/sdcard/ui_tmp_${Date.now()}.xml`;
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} shell uiautomator dump --compressed ${remotePath}`,
             undefined,
             20000
           );
           const localTmp = path.join(os.tmpdir(), `ui_input_${Date.now()}.xml`);
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} pull ${remotePath} "${localTmp}"`,
             undefined,
             10000
           );
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} shell rm ${remotePath}`,
             undefined,
             5000
@@ -1798,7 +1799,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           if (match) {
             const cx = Math.round((parseInt(match[1]!) + parseInt(match[3]!)) / 2);
             const cy = Math.round((parseInt(match[2]!) + parseInt(match[4]!)) / 2);
-            await runCommand(
+            await runAdbCommand(
               `adb ${flag} shell input tap ${cx} ${cy}`,
               undefined,
               5000
@@ -1809,12 +1810,12 @@ export function registerIdxFirebaseTools(server: McpServer): void {
 
         if (clear_first) {
           // Ctrl+A lalu Delete
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} shell input keyevent KEYCODE_CTRL_A`,
             undefined,
             3000
           );
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} shell input keyevent KEYCODE_DEL`,
             undefined,
             3000
@@ -1823,14 +1824,14 @@ export function registerIdxFirebaseTools(server: McpServer): void {
 
         // Escape spasi dan karakter khusus untuk ADB input text
         const escapedText = text.replace(/ /g, "%s").replace(/&/g, "\\&");
-        await runCommand(
+        await runAdbCommand(
           `adb ${flag} shell input text "${escapedText}"`,
           undefined,
           10000
         );
 
         if (press_enter_after) {
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} shell input keyevent KEYCODE_ENTER`,
             undefined,
             3000
@@ -1845,17 +1846,17 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           await ensureDir(ssDir);
           const ssPath = path.join(ssDir, `input_${Date.now()}.png`);
           const remoteSs = `/sdcard/ssinput_${Date.now()}.png`;
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} shell screencap -p ${remoteSs}`,
             undefined,
             10000
           );
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} pull ${remoteSs} "${ssPath}"`,
             undefined,
             10000
           );
-          await runCommand(
+          await runAdbCommand(
             `adb ${flag} shell rm ${remoteSs}`,
             undefined,
             5000
@@ -1933,19 +1934,19 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           output_path ?? path.join(vidDir, `record_${timestamp}.mp4`);
 
         // Mulai rekaman (blocking)
-        const recordResult = await runCommand(
+        const recordResult = await runAdbCommand(
           `adb ${flag} shell screenrecord --time-limit ${duration_seconds} --bit-rate ${bit_rate_mbps}000000 ${remoteVideo}`,
           undefined,
           (duration_seconds + 10) * 1000
         );
 
         // Pull video
-        await runCommand(
+        await runAdbCommand(
           `adb ${flag} pull ${remoteVideo} "${localVideo}"`,
           undefined,
           30000
         );
-        await runCommand(
+        await runAdbCommand(
           `adb ${flag} shell rm ${remoteVideo}`,
           undefined,
           5000

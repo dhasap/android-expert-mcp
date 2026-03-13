@@ -11,7 +11,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { formatToolError, truncateOutput } from "../utils.js";
+import { formatToolError, truncateOutput, puppeteerSemaphore } from "../utils.js";
 
 // Puppeteer is loaded lazily to avoid startup cost
 let puppeteerModule: typeof import("puppeteer") | null = null;
@@ -47,6 +47,10 @@ interface BrowserOptions {
   timeout_ms: number;
 }
 
+/**
+ * Raw browser launcher — do NOT call directly from tool handlers.
+ * Always use `launchBrowserGuarded()` so the semaphore is respected.
+ */
 async function launchBrowser(options: BrowserOptions) {
   const puppeteer = await getPuppeteer();
 
@@ -102,6 +106,31 @@ async function launchBrowser(options: BrowserOptions) {
   return { browser, page };
 }
 
+/**
+ * Semaphore-guarded browser launcher.
+ * Waits until a Puppeteer slot is free (max 2 concurrent across all tools),
+ * then launches.  The semaphore slot is held until the CALLER closes the
+ * browser — callers MUST call `browser.close()` in their `finally` block
+ * so the slot is returned to the pool via the returned `releaseSemaphore`.
+ *
+ * Usage pattern in every tool handler:
+ *   const { browser, page, releaseSemaphore } = await launchBrowserGuarded({...});
+ *   try { ... } finally { await browser.close(); releaseSemaphore(); }
+ */
+async function launchBrowserGuarded(
+  options: BrowserOptions
+): Promise<Awaited<ReturnType<typeof launchBrowser>> & { releaseSemaphore: () => void }> {
+  const releaseSemaphore = await puppeteerSemaphore.acquire();
+  try {
+    const result = await launchBrowser(options);
+    return { ...result, releaseSemaphore };
+  } catch (err) {
+    // Launch itself failed — release slot immediately so others aren't blocked
+    releaseSemaphore();
+    throw err;
+  }
+}
+
 // ─── Tool registration ────────────────────────────────────────────────────────
 
 export function registerScrapingTools(server: McpServer): void {
@@ -139,15 +168,17 @@ export function registerScrapingTools(server: McpServer): void {
     },
     async ({ url, wait_for, wait_selector, stealth_mode, timeout_seconds, scroll_to_bottom }) => {
       let browser: Awaited<ReturnType<typeof launchBrowser>>["browser"] | null = null;
+      let releaseSemaphore: (() => void) | null = null;
 
       try {
-        const { browser: b, page } = await launchBrowser({
+        const { browser: b, page, releaseSemaphore: rs } = await launchBrowserGuarded({
           stealth: stealth_mode,
           viewport_width: 1920,
           viewport_height: 1080,
           timeout_ms: timeout_seconds * 1000,
         });
         browser = b;
+        releaseSemaphore = rs;
 
         if (stealth_mode) await randomDelay(300, 800);
 
@@ -204,6 +235,7 @@ export function registerScrapingTools(server: McpServer): void {
         };
       } finally {
         if (browser) await browser.close().catch(() => null);
+        releaseSemaphore?.();
       }
     }
   );
@@ -232,15 +264,17 @@ export function registerScrapingTools(server: McpServer): void {
       include_text, stealth_mode, timeout_seconds,
     }) => {
       let browser: Awaited<ReturnType<typeof launchBrowser>>["browser"] | null = null;
+      let releaseSemaphore: (() => void) | null = null;
 
       try {
-        const { browser: b, page } = await launchBrowser({
+        const { browser: b, page, releaseSemaphore: rs } = await launchBrowserGuarded({
           stealth: stealth_mode,
           viewport_width: 1920,
           viewport_height: 1080,
           timeout_ms: timeout_seconds * 1000,
         });
         browser = b;
+        releaseSemaphore = rs;
 
         await page.goto(url, { waitUntil: "networkidle2", timeout: timeout_seconds * 1000 });
 
@@ -339,6 +373,7 @@ export function registerScrapingTools(server: McpServer): void {
         };
       } finally {
         if (browser) await browser.close().catch(() => null);
+        releaseSemaphore?.();
       }
     }
   );
@@ -363,15 +398,17 @@ export function registerScrapingTools(server: McpServer): void {
     },
     async ({ url, js_code, wait_for_selector, stealth_mode, timeout_seconds }) => {
       let browser: Awaited<ReturnType<typeof launchBrowser>>["browser"] | null = null;
+      let releaseSemaphore: (() => void) | null = null;
 
       try {
-        const { browser: b, page } = await launchBrowser({
+        const { browser: b, page, releaseSemaphore: rs } = await launchBrowserGuarded({
           stealth: stealth_mode,
           viewport_width: 1920,
           viewport_height: 1080,
           timeout_ms: timeout_seconds * 1000,
         });
         browser = b;
+        releaseSemaphore = rs;
 
         await page.goto(url, { waitUntil: "networkidle2", timeout: timeout_seconds * 1000 });
 
@@ -401,6 +438,7 @@ export function registerScrapingTools(server: McpServer): void {
         };
       } finally {
         if (browser) await browser.close().catch(() => null);
+        releaseSemaphore?.();
       }
     }
   );
@@ -422,15 +460,17 @@ export function registerScrapingTools(server: McpServer): void {
     },
     async ({ url, filter_type, timeout_seconds, stealth_mode }) => {
       let browser: Awaited<ReturnType<typeof launchBrowser>>["browser"] | null = null;
+      let releaseSemaphore: (() => void) | null = null;
 
       try {
-        const { browser: b, page } = await launchBrowser({
+        const { browser: b, page, releaseSemaphore: rs } = await launchBrowserGuarded({
           stealth: stealth_mode,
           viewport_width: 1920,
           viewport_height: 1080,
           timeout_ms: timeout_seconds * 1000,
         });
         browser = b;
+        releaseSemaphore = rs;
 
         const capturedRequests: Array<{
           url: string;
@@ -476,6 +516,7 @@ export function registerScrapingTools(server: McpServer): void {
         };
       } finally {
         if (browser) await browser.close().catch(() => null);
+        releaseSemaphore?.();
       }
     }
   );

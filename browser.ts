@@ -36,6 +36,48 @@ interface BrowserSession {
 const sessions = new Map<string, BrowserSession>();
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 menit
 
+/**
+ * Hard cap on concurrent Chromium instances.
+ * If exceeded on browser_open, the longest-idle session is evicted first.
+ * Keeps RAM usage bounded on low-spec VPS / dev machines.
+ */
+const MAX_ACTIVE_SESSIONS = 5;
+
+/**
+ * Evict the session that has been idle the longest.
+ * Called automatically when MAX_ACTIVE_SESSIONS is reached.
+ * Returns the evicted session ID, or null if sessions was already empty.
+ */
+async function evictOldestIdleSession(): Promise<string | null> {
+  if (sessions.size === 0) return null;
+
+  // Find the entry with the smallest (oldest) lastUsedAt timestamp
+  let oldestId = "";
+  let oldestTime = Infinity;
+  for (const [id, s] of sessions.entries()) {
+    const t = s.lastUsedAt.getTime();
+    if (t < oldestTime) {
+      oldestTime = t;
+      oldestId = id;
+    }
+  }
+
+  if (!oldestId) return null;
+
+  const evicted = sessions.get(oldestId)!;
+  try {
+    await evicted.browser.close();
+  } catch {
+    // Ignore — Chromium may have already crashed
+  }
+  sessions.delete(oldestId);
+  process.stderr.write(
+    `[browser] Session limit reached (${MAX_ACTIVE_SESSIONS}). ` +
+    `Evicted oldest idle session: ${oldestId}\n`
+  );
+  return oldestId;
+}
+
 // Auto-cleanup session yang idle
 setInterval(() => {
   const now = Date.now();
@@ -46,7 +88,25 @@ setInterval(() => {
       process.stderr.write(`[browser] Session ${id} expired and cleaned up\n`);
     }
   }
-}, 5 * 60 * 1000);
+}, 5 * 60 * 1000).unref(); // .unref() agar tidak block graceful shutdown
+
+/**
+ * Close every open Chromium instance and clear the session map.
+ * Called during SIGINT / SIGTERM in index.ts to prevent zombie processes.
+ */
+export async function closeAllBrowserSessions(): Promise<void> {
+  const closing = [...sessions.entries()].map(async ([id, session]) => {
+    try {
+      await session.browser.close();
+    } catch {
+      // Ignore — process may already be dead
+    } finally {
+      sessions.delete(id);
+    }
+  });
+  await Promise.allSettled(closing);
+  process.stderr.write(`[browser] All sessions closed (graceful shutdown)\n`);
+}
 
 function generateSessionId(): string {
   return `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -176,6 +236,15 @@ export function registerBrowserTools(server: McpServer): void {
             timeout: timeout_seconds * 1000,
           });
         } else {
+          // ── Session limit guard ──────────────────────────────────────────
+          // Evict the longest-idle session if we are at capacity.
+          if (sessions.size >= MAX_ACTIVE_SESSIONS) {
+            const evictedId = await evictOldestIdleSession();
+            process.stderr.write(
+              `[browser] Auto-evicted session ${evictedId ?? "?"} to make room.\n`
+            );
+          }
+
           // Buat session baru
           const browser = await puppeteer.default.launch({
             headless: true,
@@ -280,6 +349,7 @@ export function registerBrowserTools(server: McpServer): void {
                 `${pageInfo}` +
                 `\n📱 Device  : ${device} (${vp.width}×${vp.height})` +
                 `\n🛡️  Stealth : ${stealth}` +
+                `\n🪟 Sesi    : ${sessions.size} / ${MAX_ACTIVE_SESSIONS} aktif` +
                 screenshotInfo,
             },
           ],

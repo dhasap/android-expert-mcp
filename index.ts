@@ -1,108 +1,99 @@
 #!/usr/bin/env node
 
 /**
- * Android Expert MCP Server — v2.0
+ * Android Expert MCP Server — v5.1.0
  * ─────────────────────────────────────────────────────────────────────────────
- * Comprehensive Model Context Protocol server providing expert-level
- * capabilities for:
- *   • Architecture & Planning (file system, markdown docs)
- *   • Android/Kotlin/Gradle automation + ADB interaction
- *   • Web Scraping & DOM extraction via Puppeteer
- *   • Website Review & Audit via Lighthouse
- *   • 🆕 Interactive Browser Control (full session-based browser automation)
- *   • 🆕 Interactive UI Widgets (choices, menus, progress, forms, tables)
+ * 104 tools across 13 categories.
  *
- * Transport: stdio (for Kimi CLI, Claude CLI, or any MCP-compatible agent)
+ * v5.1 additions:
+ *   • Category 13 — 🧠 Context Manager (7 tools)
+ *       Session Snapshot : context_save/load/list/delete
+ *       Context Compactor: context_compact/compact_file/stats
+ *
+ * v5.0: Wireless ADB (cat 11) + GitHub Integration (cat 12)
+ * v4.x: Semaphore, ADB Mutex, secret masking, path protection, session caps
+ *
+ * Transport: stdio
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
-// Tool category registrars
 import { registerArchitectureTools } from "./tools/architecture.js";
 import { registerAndroidTools } from "./tools/android.js";
 import { registerScrapingTools } from "./tools/scraping.js";
 import { registerAuditTools } from "./tools/audit.js";
-import { registerBrowserTools } from "./tools/browser.js";
+import { registerBrowserTools, closeAllBrowserSessions } from "./tools/browser.js";
 import { registerInteractiveTools } from "./tools/interactive.js";
 import { registerIdxFirebaseTools } from "./tools/idx_firebase.js";
 import { registerErrorMemoryTools } from "./tools/error_memory.js";
 import { registerScaffoldingTools } from "./tools/scaffolding.js";
 import { registerVpsTools } from "./tools/vps_deploy.js";
-
-// ─── Server bootstrap ────────────────────────────────────────────────────────
+import { registerWirelessAdbTools } from "./tools/wireless_adb.js";
+import { registerGithubTools } from "./tools/github.js";
+import { registerContextManagerTools } from "./tools/context_manager.js";
+import { cleanupTempDirectories } from "./utils.js";
 
 async function main(): Promise<void> {
   const server = new McpServer({
     name: "android-expert-mcp",
-    version: "2.0.0",
+    version: "5.1.0",
     description:
       "Expert MCP: Android/Kotlin dev, web scraping, website auditing, " +
-      "interactive browser control, and UI interaction widgets",
+      "browser control, UI widgets, IDX/Firebase, Error Memory, Scaffolding, " +
+      "VPS Deploy, Wireless ADB, GitHub Integration, Context Manager",
   });
 
-  // Category 1: Architecture & Planning (6 tools)
-  registerArchitectureTools(server);
+  registerArchitectureTools(server);      // Cat 1  — 6 tools
+  registerAndroidTools(server);           // Cat 2  — 8 tools
+  registerScrapingTools(server);          // Cat 3  — 4 tools
+  registerAuditTools(server);             // Cat 4  — 5 tools
+  registerBrowserTools(server);           // Cat 5  — 14 tools
+  registerInteractiveTools(server);       // Cat 6  — 9 tools
+  registerIdxFirebaseTools(server);       // Cat 7  — 13 tools
+  registerErrorMemoryTools(server);       // Cat 8  — 6 tools
+  registerScaffoldingTools(server);       // Cat 9  — 4 tools
+  registerVpsTools(server);               // Cat 10 — 10 tools
+  registerWirelessAdbTools(server);       // Cat 11 — 8 tools
+  registerGithubTools(server);            // Cat 12 — 10 tools
+  registerContextManagerTools(server);    // Cat 13 — 7 tools
 
-  // Category 2: Android/Kotlin/Gradle/ADB (8 tools)
-  registerAndroidTools(server);
-
-  // Category 3: Web Scraping & DOM (4 tools)
-  registerScrapingTools(server);
-
-  // Category 4: Website Review & Audit (5 tools)
-  registerAuditTools(server);
-
-  // Category 5: 🆕 Interactive Browser Control (14 tools)
-  registerBrowserTools(server);
-
-  // Category 6: 🆕 Interactive UI Widgets (9 tools)
-  registerInteractiveTools(server);
-
-  // Category 7: IDX Emulator + Firebase Test Lab (13 tools)
-  registerIdxFirebaseTools(server);
-
-  // Category 8: 🧠 Error Memory Bank (6 tools)
-  registerErrorMemoryTools(server);
-
-  // Category 9: 🏗️ Project Scaffolding Engine (4 tools)
-  registerScaffoldingTools(server);
-
-  // Category 10: 🚀 VPS & Deploy Manager (10 tools)
-  registerVpsTools(server);
-
-  // Connect via stdio transport
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
   process.stderr.write(
-    `[android-expert-mcp v4.0] Server started\n` +
-    `[android-expert-mcp v4.0] 79 tools across 10 categories\n` +
+    `[android-expert-mcp v5.1] Server started — 13 categories, 104 tools\n` +
     `  Arch(6) Android(8) Scraping(4) Audit(5) Browser(14) UI(9)\n` +
-    `  IDX+FTL(13) ErrorMemory(6) Scaffold(4) VPS(10)\n`
+    `  IDX+FTL(13) ErrorMemory(6) Scaffold(4) VPS(10)\n` +
+    `  WirelessADB(8) GitHub(10) ContextManager(7)\n`
   );
 
-  // Graceful shutdown
+  const runCleanup = () => {
+    cleanupTempDirectories(24)
+      .then((s) => { if (!s.includes("No files")) process.stderr.write(`[mcp] ${s}\n`); })
+      .catch((e: unknown) => process.stderr.write(`[mcp] cleanup error: ${String(e)}\n`));
+  };
+  runCleanup();
+  setInterval(runCleanup, 60 * 60 * 1000).unref();
+
+  let shuttingDown = false;
   const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     process.stderr.write("[android-expert-mcp] Shutting down...\n");
-    await server.close();
+    try { await closeAllBrowserSessions(); } catch { /* non-fatal */ }
+    try { await server.close(); } catch { /* non-fatal */ }
     process.exit(0);
   };
-
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
-
-  // Keep server alive — log unhandled rejections but don't crash
-  process.on("unhandledRejection", (reason) => {
-    process.stderr.write(
-      `[android-expert-mcp] Unhandled rejection: ${String(reason)}\n`
-    );
-  });
+  process.on("unhandledRejection", (r) =>
+    process.stderr.write(`[android-expert-mcp] Unhandled rejection: ${String(r)}\n`)
+  );
 }
 
-main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`[android-expert-mcp] Fatal error: ${message}\n`);
+main().catch((e: unknown) => {
+  process.stderr.write(`[android-expert-mcp] Fatal: ${e instanceof Error ? e.message : String(e)}\n`);
   process.exit(1);
 });

@@ -1,68 +1,171 @@
-# Changelog
-
-## [2.0.0] — Browser Control & Interactive UI
-
-### 🆕 Ditambahkan: Category 5 — Interactive Browser Control (14 tools)
-
-Tools baru yang memungkinkan AI **benar-benar membuka dan mengontrol browser**
-dalam sesi persisten, bukan hanya scraping satu kali.
-
-| Tool | Fungsi |
-|------|--------|
-| `browser_open` | Buka browser + navigasi URL, buat session persisten |
-| `browser_screenshot` | Ambil screenshot kondisi browser saat ini |
-| `browser_click` | Klik elemen via CSS selector |
-| `browser_type` | Ketik teks ke input field (simulasi manusia) |
-| `browser_navigate` | goto / back / forward / reload / new_tab |
-| `browser_scroll` | Scroll up/down/top/bottom/to_element |
-| `browser_get_content` | Ambil HTML/teks/links/inputs dari halaman aktif |
-| `browser_wait` | Tunggu selector/network_idle/waktu tertentu |
-| `browser_select` | Pilih dropdown, toggle checkbox/radio |
-| `browser_execute_script` | Jalankan JS arbitrary di halaman |
-| `browser_close` | Tutup session dan bebaskan memori |
-| `browser_list_sessions` | Lihat semua sesi browser aktif |
-| `browser_hover` | Hover untuk trigger tooltip/dropdown |
-| `browser_keyboard` | Tekan key khusus: Enter, Tab, Ctrl+A, dll |
-
-**Fitur utama session-based browser:**
-- Session persisten — buka sekali, gunakan berkali-kali
-- Multi-tab support
-- Auto-cleanup session setelah 30 menit idle
-- Stealth mode (anti-bot detection)
-- Screenshot otomatis setelah setiap aksi untuk verifikasi
+# Changelog — Android Expert MCP Server
 
 ---
 
-### 🆕 Ditambahkan: Category 6 — Interactive UI Widgets (9 tools)
+## [5.0.0] — Wireless ADB + GitHub Integration
 
-Tools untuk AI mempresentasikan pilihan dan mengumpulkan input secara visual.
+### 🆕 Category 11 — 📡 Wireless ADB Debugging (8 tools)
+
+Scrape dan debug Android app **tanpa kabel USB** dan **tanpa emulator**.
+Mendukung Android 10- (via USB tcpip) dan Android 11+ (full wireless pairing).
 
 | Tool | Fungsi |
 |------|--------|
-| `ui_single_choice` | Widget pilihan tunggal (radio button style) |
-| `ui_multi_choice` | Widget pilihan berganda (checkbox style) |
-| `ui_confirm` | Dialog konfirmasi sebelum aksi berbahaya |
-| `ui_menu` | Menu navigasi berjenjang |
-| `ui_progress` | Progress tracker untuk task multi-step |
-| `ui_info_card` | Kartu informasi key-value terstruktur |
-| `ui_input_form` | Form multi-field terstruktur |
-| `ui_table` | Tabel ASCII dari data dinamis |
-| `ui_notification` | Notifikasi success/error/warning/info/tip |
+| `adb_wifi_pair` | Pair Android 11+ via 6-digit pairing code (Settings → Wireless Debugging) |
+| `adb_wifi_connect` | Hubungkan ke IP:PORT perangkat wireless |
+| `adb_wifi_enable` | Aktifkan TCP/IP mode dari USB — lalu cabut kabel (Android 10-) |
+| `adb_wifi_devices` | Tampilkan semua perangkat TCP yang terhubung |
+| `adb_wifi_disconnect` | Putuskan satu atau semua koneksi wireless |
+| `adb_wifi_shell` | Jalankan ADB shell command ke perangkat wireless |
+| `adb_wifi_screenshot` | Screenshot layar device via WiFi |
+| `adb_wifi_ui_dump` | Dump UI hierarchy XML + ekstrak teks & resource-ID untuk scraping app |
+
+Semua tool menggunakan `runAdbCommand` (global ADB mutex) — aman dari race condition.
 
 ---
 
-### 🔧 Diperbaiki (v1 → v2)
+### 🆕 Category 12 — 🐙 GitHub Integration (10 tools)
 
-- `index.ts`: Tambah `unhandledRejection` handler agar server tidak crash dari error async
-- `index.ts`: Log jumlah tools saat startup untuk verifikasi
-- Semua tools: Konsistensi format error message dengan `formatToolError()`
-- Browser tools: Auto-cleanup Chromium instance di finally block mencegah memory leak
+Kelola GitHub repo langsung dari AI. Default owner: **@dhasap**. Semua tool override-able via `owner` parameter.
+
+| Tool | Fungsi |
+|------|--------|
+| `github_repo_list` | List repo dengan filter type + sort |
+| `github_repo_info` | Detail repo: stats, branches, languages, license |
+| `github_repo_create` | Buat repo baru (public/private, auto-init, gitignore, license) |
+| `github_file_read` | Baca file dari repo (any branch/tag/SHA) |
+| `github_file_write` | Create atau update file di repo (PUT via API) |
+| `github_issue_list` | List issue dengan filter state + labels |
+| `github_issue_create` | Buat issue baru dengan labels dan assignees |
+| `github_pr_list` | List Pull Requests (open/closed/all) |
+| `github_commit_push` | Push multiple file dalam satu atomic commit via Tree API |
+| `github_release_create` | Buat GitHub Release (draft/prerelease support) |
+
+Setup: `export GITHUB_TOKEN=ghp_...` (scope: `repo`)
+
+---
+
+## [4.3.0] — Concurrency Hardening + Secret Masking
+
+### Fix 1 — Puppeteer Concurrency Limiter (scraping.ts, audit.ts)
+- Tambah `class Semaphore` di `utils.ts` — counting semaphore FIFO, deadlock-proof
+- `puppeteerSemaphore = new Semaphore(2)` — max 2 Chromium concurrent global
+- `scraping.ts`: `launchBrowserGuarded()` wrapper + `releaseSemaphore?.()` di semua `finally` (4 tools)
+- `audit.ts`: acquire sebelum `puppeteer.launch()`, release di `finally` (4 tools)
+
+### Fix 2 — Global ADB Mutex (android.ts, idx_firebase.ts)
+- `adbMutex = new Mutex()` + `runAdbCommand()` helper di `utils.ts`
+- `android.ts`: 10 panggilan ADB diganti `runAdbCommand`
+- `idx_firebase.ts`: 48 panggilan ADB diganti `runAdbCommand`
+
+### Fix 3 — Secret Masking (vps_deploy.ts)
+- `maskSecrets(text, extras?)` + `formatSecureToolError()` di `utils.ts`
+- 13 env var sensitif di-scrub otomatis (TURSO_AUTH_TOKEN, BOT_TOKEN, dll)
+- `vps_turso`: `handlerSecrets` dihoist ke handler scope, stdout/stderr + error message disanitasi
+
+---
+
+## [4.2.0] — Resource & Security Hardening
+
+### Fix 1 — Auto Temp File Cleanup
+- `cleanupTempDirectories(maxAgeHours)` + `MCP_TEMP_DIRS` registry di `utils.ts`
+- Scan 5 folder temp, hapus file > 24 jam, log bytes yang dibebaskan
+- Dipanggil sekali saat startup + setiap 1 jam via `setInterval(...).unref()`
+
+### Fix 2 — Browser Session Cap (browser.ts)
+- `MAX_ACTIVE_SESSIONS = 5` — batas hard sesi Chromium aktif
+- `evictOldestIdleSession()` — otomatis tutup sesi paling idle saat limit tercapai
+- Response `browser_open` tampilkan `🪟 Sesi: X / 5 aktif`
+
+### Fix 3 — Path Traversal Protection (architecture.ts)
+- `isSafePath(path, allowedRoot?)` di `utils.ts`
+- Blokir 13 system prefix (`/etc`, `/var`, `/usr`, `/root`, dll.)
+- Blokir 15 sensitive segment (`.ssh`, `.gnupg`, `.aws`, `.kube`, `id_rsa`, dll.)
+- `read_file`, `write_file`, `edit_file` semua diproteksi
+- `write_file` tambah param `restrict_to_cwd` untuk mode sandbox ketat
+
+---
+
+## [4.1.0] — Stability Fixes
+
+### Fix 1 — Race Condition on JSON Storage
+- `class Mutex` + `atomicReadJson` + `atomicWriteJson` (write ke `.tmp` → `rename`) di `utils.ts`
+- `error_memory.ts`: `withBank<T>()` helper, semua handler dimutex-kan
+- `vps_deploy.ts`: `storeMutex`, `withStore<T>()`, `readStore()` helpers
+
+### Fix 2 — Memory Leak in Interactive Session Store
+- `INTERACTION_TTL_MS = 60 min` — purge session lama via `setInterval(...).unref()`
+
+### Fix 3 — Browser Zombie Process Cleanup
+- `closeAllBrowserSessions()` di `browser.ts`, dipanggil di SIGINT/SIGTERM handler
+- `shuttingDown` flag mencegah double-shutdown
+
+### Fix 4 — SSH Shell Escaping
+- `buildSshCmd()` di `vps_deploy.ts`: base64-encode seluruh command
+- `echo <b64> | base64 -d | bash` — tidak ada masalah quoting apapun
+
+---
+
+## [4.0.0] — Error Memory Bank + Scaffolding + VPS Deploy
+
+### 🆕 Category 8 — 🧠 Error Memory Bank (6 tools)
+Menyimpan, mencari, dan menganalisa error yang pernah terjadi lintas sesi.
+
+| Tool | Fungsi |
+|------|--------|
+| `error_auto_diagnose` | Auto-diagnose error + cari solusi dari memory bank |
+| `error_remember` | Simpan error baru ke bank |
+| `error_search` | Cari error mirip berdasarkan fingerprint/keyword |
+| `error_add_solution` | Tambah solusi ke error yang ada |
+| `error_stats` | Statistik per tech stack dengan health score |
+| `error_export` | Export bank ke JSON untuk backup |
+
+### 🆕 Category 9 — 🏗️ Project Scaffolding Engine (4 tools)
+
+| Tool | Fungsi |
+|------|--------|
+| `scaffold_android` | Android app (Jetpack Compose, MVVM, Hilt, Room) |
+| `scaffold_telegram_bot` | Telegram bot (Node.js/Python) |
+| `scaffold_chrome_extension` | Chrome extension (Manifest V3) |
+| `scaffold_node_api` | REST API (Express/Fastify + TypeScript) |
+
+### 🆕 Category 10 — 🚀 VPS & Deploy Manager (10 tools)
+
+| Tool | Fungsi |
+|------|--------|
+| `vps_add_server` | Simpan profil server SSH |
+| `vps_list_servers` | Tampilkan server tersimpan |
+| `vps_exec` | Jalankan command di VPS remote |
+| `vps_monitor` | Monitor RAM/CPU/disk/network |
+| `vps_deploy` | Upload file + pre/post commands via rsync/scp |
+| `vps_logs` | Baca journalctl/pm2/nginx/file log |
+| `vps_service` | Kelola pm2/systemd service |
+| `vps_turso` | Kelola Turso DB (query, migrate, backup) |
+| `vps_deploy_history` | Riwayat deploy terakhir |
+| `vps_optimize` | Auto-optimize VPS (swap, cache, nginx) |
+
+---
+
+## [3.0.0] — IDX Emulator + Firebase Test Lab
+
+### 🆕 Category 7 — IDX Emulator + Firebase Test Lab (13 tools)
+Kontrol Android emulator di Google IDX dan jalankan test di Firebase Test Lab.
+
+---
+
+## [2.0.0] — Browser Control + Interactive UI
+
+### 🆕 Category 5 — Interactive Browser Control (14 tools)
+Session-based Chromium control: click, type, scroll, screenshot, JS execute.
+
+### 🆕 Category 6 — Interactive UI Widgets (9 tools)
+Widget pilihan, konfirmasi, progress, form, tabel untuk interaksi AI-ke-user.
 
 ---
 
 ## [1.0.0] — Initial Release
 
-- Architecture & Planning Tools (6 tools)
-- Android/Kotlin/Gradle/ADB Tools (8 tools)
-- Web Scraping & DOM Extraction Tools (4 tools)
-- Website Review & Audit Tools (5 tools)
+- Architecture & Planning Tools (6)
+- Android/Kotlin/Gradle/ADB Tools (8)
+- Web Scraping & DOM Tools (4)
+- Website Review & Audit Tools (5)
