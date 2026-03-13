@@ -1,0 +1,123 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .idx/dev.nix — Flutter IDX Workspace + Android Emulator (ADB-accessible)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Template ini untuk workspace IDX berbasis Flutter yang:
+#   • Tetap bisa develop / run Flutter app (android preview bawaan IDX)
+#   • Emulator Android bisa diakses via ADB — untuk scrape app apapun
+#     (native APK, Flutter app, atau app pihak ketiga)
+#   • Tools ADB tersedia di terminal
+#   • Node.js tersedia untuk MCP Server
+#
+# CARA PAKAI:
+#   1. Copy file ini ke .idx/dev.nix di root project kamu
+#   2. Di IDX: klik "Rebuild Environment" (atau Ctrl+Shift+P → Rebuild)
+#   3. Tunggu rebuild (~2-5 menit pertama kali)
+#   4. Emulator otomatis muncul di panel kanan IDX (Android preview)
+#   5. Jalankan MCP server kamu, lalu adb_wifi_connect / idx_connect_emulator
+#
+# KENAPA FLUTTER, BUKAN ANDROID STUDIO?
+#   Android Studio IDX membutuhkan whitelist khusus dari Google.
+#   Flutter IDX tersedia untuk semua user dan sudah include Android emulator
+#   yang bisa diakses via ADB — jadi bisa dipakai scrape app apapun.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+{ pkgs, ... }: {
+
+  # Gunakan channel stable untuk Flutter
+  channel = "stable";
+
+  # ── Packages sistem ─────────────────────────────────────────────────────────
+  packages = [
+    # Java (wajib untuk Gradle dan Android tools)
+    pkgs.jdk17
+
+    # ADB + fastboot (untuk connect ke emulator dari MCP / terminal)
+    pkgs.android-tools
+
+    # Node.js untuk MCP Server
+    pkgs.nodejs_20
+
+    # Tools pendukung
+    pkgs.curl
+    pkgs.git
+    pkgs.unzip
+  ];
+
+  # ── Environment variables ────────────────────────────────────────────────────
+  env = {
+    # Pastikan ADB dari android-tools dikenali
+    ANDROID_ADB_SERVER_ADDRESS = "localhost";
+
+    # Chrome untuk Puppeteer (jika MCP butuh headless browser)
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true";
+    PUPPETEER_EXECUTABLE_PATH = "/usr/bin/google-chrome-stable";
+  };
+
+  # ── IDX-specific config ──────────────────────────────────────────────────────
+  idx = {
+    # Extensions yang terinstall otomatis
+    extensions = [
+      # Flutter & Dart (inti Flutter IDX)
+      "Dart-Code.flutter"
+      "Dart-Code.dart-code"
+
+      # Opsional tapi berguna:
+      # "mhutchie.git-graph"
+      # "eamodio.gitlens"
+    ];
+
+    # ── Android Preview (emulator di panel kanan IDX) ──────────────────────────
+    #
+    # Ini yang membuat emulator muncul di IDX tanpa whitelist Android Studio.
+    # Emulator yang berjalan di sini JUGA bisa diakses via ADB dari terminal
+    # maupun dari MCP Server tools (idx_connect_emulator, adb_wifi_shell, dll.).
+    #
+    previews = {
+      enable = true;
+      previews = {
+        android = {
+          # Command untuk launch Flutter app di emulator.
+          # Jika kamu hanya mau emulator tanpa run Flutter app, hapus bagian ini
+          # dan start emulator manual via onStart di bawah.
+          command = [
+            "flutter"
+            "run"
+            "--machine"
+            "-d" "android"
+            "--pid-file" "/tmp/flutter-android-pid"
+          ];
+          manager = "flutter";
+        };
+      };
+    };
+
+    # ── Lifecycle hooks ────────────────────────────────────────────────────────
+    workspace = {
+
+      # Dijalankan SEKALI saat workspace pertama dibuat
+      onCreate = {
+        # Install Flutter dependencies jika ada pubspec.yaml
+        flutter-pub-get = "[ -f pubspec.yaml ] && flutter pub get || echo 'No pubspec.yaml, skipping'";
+
+        # Buat direktori untuk MCP temp files
+        mcp-dirs = "mkdir -p /tmp/mcp-screenshots /tmp/mcp-audits /tmp/mcp-emulator";
+      };
+
+      # Dijalankan SETIAP KALI workspace di-(re)start
+      onStart = {
+        # Start ADB server agar siap dipakai MCP tools
+        start-adb = "adb start-server 2>/dev/null || true";
+
+        # Info: emulator akan muncul otomatis via Android preview di atas
+        # Jika butuh emulator standalone tanpa Flutter app, uncomment ini:
+        # start-emulator = ''
+        #   emulator -avd $(emulator -list-avds | head -1) \
+        #     -no-window -no-audio -no-snapshot \
+        #     -gpu swiftshader_indirect &
+        # '';
+      };
+    };
+  };
+}

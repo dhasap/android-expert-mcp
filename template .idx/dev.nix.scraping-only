@@ -1,0 +1,93 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .idx/dev.nix — Scraping-Only Workspace (Emulator + ADB + MCP, tanpa dev app)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Template ini untuk workspace IDX yang HANYA dipakai scraping / testing app,
+# bukan untuk develop app Flutter/Android dari awal.
+#
+# Use case:
+#   • Kamu punya APK yang mau di-scrape datanya
+#   • Mau test app dari Play Store di emulator
+#   • Mau pakai Firebase Test Lab dari IDX
+#   • Mau run MCP Server untuk scraping automation
+#
+# CARA INSTALL APK KE EMULATOR:
+#   Setelah emulator running:
+#   1. Via MCP: idx_install_apk(apk_path="/path/ke/app.apk")
+#   2. Via terminal: adb install /path/ke/app.apk
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+{ pkgs, ... }: {
+
+  channel = "stable";
+
+  packages = [
+    pkgs.jdk17
+    pkgs.android-tools   # ADB + fastboot
+    pkgs.nodejs_20       # MCP Server
+    pkgs.curl
+    pkgs.git
+    pkgs.wget
+    pkgs.unzip
+
+    # Firebase CLI (untuk Firebase Test Lab)
+    # Install via npm di onStart karena lebih up-to-date:
+    # npm install -g firebase-tools
+  ];
+
+  env = {
+    ANDROID_ADB_SERVER_ADDRESS = "localhost";
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true";
+    PUPPETEER_EXECUTABLE_PATH = "/usr/bin/google-chrome-stable";
+  };
+
+  idx = {
+    extensions = [
+      # Flutter tetap diinstall agar Android preview tersedia
+      "Dart-Code.flutter"
+      "Dart-Code.dart-code"
+    ];
+
+    previews = {
+      enable = true;
+      previews = {
+        # Android preview menggunakan Flutter's emulator infrastructure
+        # tapi TIDAK menjalankan Flutter app — emulator tetap booting
+        android = {
+          # Trick: gunakan flutter devices untuk "warm up" emulator
+          # tanpa benar-benar run app
+          command = [
+            "bash" "-c"
+            "adb wait-for-device && echo 'Emulator ready' && tail -f /dev/null"
+          ];
+          manager = "flutter";
+        };
+      };
+    };
+
+    workspace = {
+      onCreate = {
+        # Setup direktori MCP
+        mcp-setup = ''
+          mkdir -p /tmp/mcp-screenshots /tmp/mcp-audits /tmp/mcp-emulator
+          echo "✅ MCP directories created"
+        '';
+
+        # Install Firebase CLI jika butuh FTL
+        # firebase-cli = "npm install -g firebase-tools";
+
+        # Install MCP server dependencies jika ada package.json di root
+        mcp-install = "[ -f package.json ] && npm install || echo 'No package.json'";
+      };
+
+      onStart = {
+        # Start ADB server
+        start-adb = "adb start-server 2>/dev/null && echo '✅ ADB server started' || true";
+
+        # Build MCP server jika ada TypeScript source
+        build-mcp = "[ -f tsconfig.json ] && npm run build 2>/dev/null || true";
+      };
+    };
+  };
+}
