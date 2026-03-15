@@ -33,16 +33,18 @@ import { registerVpsTools } from "./tools/vps_deploy.js";
 import { registerWirelessAdbTools } from "./tools/wireless_adb.js";
 import { registerGithubTools } from "./tools/github.js";
 import { registerContextManagerTools } from "./tools/context_manager.js";
+import { registerAdvancedTestingTools } from "./tools/advanced_testing.js";
 import { cleanupTempDirectories } from "./utils.js";
 
 async function main(): Promise<void> {
   const server = new McpServer({
     name: "android-expert-mcp",
-    version: "5.1.0",
+    version: "5.3.0",
     description:
       "Expert MCP: Android/Kotlin dev, web scraping, website auditing, " +
       "browser control, UI widgets, IDX/Firebase, Error Memory, Scaffolding, " +
-      "VPS Deploy, Wireless ADB, GitHub Integration, Context Manager",
+      "VPS Deploy, Wireless ADB, GitHub Integration, Context Manager, " +
+      "Advanced Testing (API, Performance, Security, Push Notification)",
   });
 
   registerArchitectureTools(server);      // Cat 1  — 6 tools
@@ -58,6 +60,7 @@ async function main(): Promise<void> {
   registerWirelessAdbTools(server);       // Cat 11 — 8 tools
   registerGithubTools(server);            // Cat 12 — 10 tools
   registerContextManagerTools(server);    // Cat 13 — 7 tools
+  registerAdvancedTestingTools(server);    // Cat 14 — 10 tools
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
