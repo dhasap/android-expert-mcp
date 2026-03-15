@@ -40,7 +40,7 @@ cd android-expert-mcp
 ## 📦 Langkah 2 — Install & Build
 
 ```bash
-npm install   # Download Chromium ~300-500 MB
+npm install   # Install dependencies
 npm run build
 ```
 
@@ -54,7 +54,48 @@ npm run build
 
 ---
 
-## 🔌 Langkah 3 — Pasang ke AI Agent
+## ⚙️ Langkah 3 — Environment Variables (WAJIB)
+
+Beberapa fitur membutuhkan environment variables untuk berfungsi:
+
+### 🕷️ Puppeteer / Chrome (Wajib untuk Web Scraping, Audit, Browser)
+
+```bash
+# Cari lokasi Chrome/Chromium
+which chromium
+which google-chrome-stable
+
+# Set environment variable
+export PUPPETEER_EXECUTABLE_PATH="/usr/bin/chromium"
+
+# Atau otomatis
+export PUPPETEER_EXECUTABLE_PATH=$(which chromium || which google-chrome)
+```
+
+📖 Lihat **[PUPPETEER_SETUP_GUIDE.md](PUPPETEER_SETUP_GUIDE.md)** untuk detail lengkap.
+
+### 🐙 GitHub Integration (Opsional)
+
+```bash
+export GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+### 🔥 Firebase Test Lab (Opsional)
+
+```bash
+export TURSO_AUTH_TOKEN=eyJ...
+```
+
+### Persistent Environment (tambahkan ke `~/.bashrc` atau `~/.zshrc`)
+
+```bash
+echo 'export PUPPETEER_EXECUTABLE_PATH="/usr/bin/chromium"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+---
+
+## 🔌 Langkah 4 — Pasang ke AI Agent
 
 ```bash
 # Claude Code CLI
@@ -79,7 +120,7 @@ kimi mcp add --transport stdio node /absolute/path/to/android-expert-mcp/build/i
 
 ---
 
-## 🐙 Langkah 4 — Setup GitHub Integration (Opsional)
+## 🐙 Langkah 5 — Setup GitHub Integration (Opsional)
 
 ```bash
 # Buat token di: github.com → Settings → Developer Settings → Personal access tokens
@@ -95,7 +136,7 @@ Default owner sudah dikonfigurasi ke **@dhasap** — bisa di-override di setiap 
 
 ---
 
-## 📡 Langkah 5 — Setup Wireless ADB
+## 📡 Langkah 6 — Setup Wireless ADB
 
 ### Android 11+ (Full Wireless — Tanpa USB)
 

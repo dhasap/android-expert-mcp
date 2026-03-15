@@ -11,12 +11,12 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { formatToolError, truncateOutput, puppeteerSemaphore } from "../utils.js";
+import { formatToolError, truncateOutput, puppeteerSemaphore, buildPuppeteerLaunchOptions } from "../utils.js";
 
 // Puppeteer is loaded lazily to avoid startup cost
-let puppeteerModule: typeof import("puppeteer") | null = null;
+let puppeteerModule: any = null;
 
-async function getPuppeteer(): Promise<typeof import("puppeteer")> {
+async function getPuppeteer(): Promise<any> {
   if (!puppeteerModule) {
     puppeteerModule = await import("puppeteer");
   }
@@ -54,26 +54,15 @@ interface BrowserOptions {
 async function launchBrowser(options: BrowserOptions) {
   const puppeteer = await getPuppeteer();
 
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-accelerated-2d-canvas",
-      "--disable-gpu",
-      "--window-size=1920,1080",
-      "--disable-blink-features=AutomationControlled",
-      ...(options.stealth
-        ? [
-            "--disable-features=site-per-process",
-            "--disable-extensions",
-            "--proxy-server=direct://",
-            "--proxy-bypass-list=*",
-          ]
-        : []),
-    ],
-  });
+  const extraArgs = options.stealth
+    ? [
+        "--disable-features=site-per-process",
+        "--disable-extensions",
+        "--proxy-server=direct://",
+        "--proxy-bypass-list=*",
+      ]
+    : [];
+  const browser = await puppeteer.launch(buildPuppeteerLaunchOptions(extraArgs));
 
   const page = await browser.newPage();
 
@@ -280,7 +269,7 @@ export function registerScrapingTools(server: McpServer): void {
 
         // Extract everything in one page.evaluate call for efficiency
         const domData = await page.evaluate(
-          (opts) => {
+          (opts: any) => {
             const data: Record<string, unknown> = {};
 
             // Title & basic info
@@ -481,7 +470,7 @@ export function registerScrapingTools(server: McpServer): void {
 
         await page.setRequestInterception(true);
 
-        page.on("request", (req) => {
+        page.on("request", (req: any) => {
           const rType = req.resourceType();
           if (filter_type === "all" || rType === filter_type) {
             capturedRequests.push({

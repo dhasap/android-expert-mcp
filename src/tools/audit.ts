@@ -15,12 +15,12 @@ import { z } from "zod";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
-import { formatToolError, ensureDir, truncateOutput, puppeteerSemaphore } from "../utils.js";
+import { formatToolError, ensureDir, truncateOutput, puppeteerSemaphore, buildPuppeteerLaunchOptions } from "../utils.js";
 
 // Lazy-load Puppeteer and Lighthouse to keep startup fast
-let puppeteerModule: typeof import("puppeteer") | null = null;
+let puppeteerModule: any = null;
 
-async function getPuppeteer(): Promise<typeof import("puppeteer")> {
+async function getPuppeteer(): Promise<any> {
   if (!puppeteerModule) {
     puppeteerModule = await import("puppeteer");
   }
@@ -231,7 +231,7 @@ export function registerAuditTools(server: McpServer): void {
       timeout_seconds: z.number().int().min(10).max(120).default(30),
     },
     async ({ url, output_path, full_page, device, wait_seconds, timeout_seconds }) => {
-      let browser: import("puppeteer").Browser | null = null;
+      let browser: any = null;
       let releaseSemaphore: (() => void) | null = null;
 
       try {
@@ -245,10 +245,7 @@ export function registerAuditTools(server: McpServer): void {
         const viewport = viewports[device];
 
         releaseSemaphore = await puppeteerSemaphore.acquire();
-        browser = await puppeteer.launch({
-          headless: true,
-          args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-        });
+        browser = await puppeteer.launch(buildPuppeteerLaunchOptions());
 
         const page = await browser.newPage();
         await page.setViewport(viewport);
@@ -345,7 +342,7 @@ export function registerAuditTools(server: McpServer): void {
         .describe("Audit timeout in seconds (default: 120)"),
     },
     async ({ url, categories, device, output_dir, timeout_seconds }) => {
-      let browser: import("puppeteer").Browser | null = null;
+      let browser: any = null;
       let releaseSemaphore: (() => void) | null = null;
 
       try {
@@ -353,20 +350,13 @@ export function registerAuditTools(server: McpServer): void {
         const puppeteer = await getPuppeteer();
 
         releaseSemaphore = await puppeteerSemaphore.acquire();
-        browser = await puppeteer.launch({
-          headless: true,
-          args: [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--remote-debugging-port=9222",
-          ],
-          defaultViewport: null,
-        });
+        browser = await puppeteer.launch(buildPuppeteerLaunchOptions(
+          ["--remote-debugging-port=9222"],
+          { defaultViewport: null }
+        ));
 
         // Dynamically import lighthouse
-        let lighthouse: typeof import("lighthouse").default;
+        let lighthouse: any;
         try {
           const lhModule = await import("lighthouse");
           lighthouse = lhModule.default;
@@ -578,17 +568,14 @@ export function registerAuditTools(server: McpServer): void {
       timeout_seconds: z.number().int().min(10).max(120).default(30),
     },
     async ({ url, viewports, timeout_seconds }) => {
-      let browser: import("puppeteer").Browser | null = null;
+      let browser: any = null;
       let releaseSemaphore: (() => void) | null = null;
 
       try {
         const puppeteer = await getPuppeteer();
 
         releaseSemaphore = await puppeteerSemaphore.acquire();
-        browser = await puppeteer.launch({
-          headless: true,
-          args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-        });
+        browser = await puppeteer.launch(buildPuppeteerLaunchOptions());
 
         const results: Array<{
           viewport: string;
@@ -717,17 +704,14 @@ export function registerAuditTools(server: McpServer): void {
       timeout_seconds: z.number().int().min(10).max(60).default(30),
     },
     async ({ url, timeout_seconds }) => {
-      let browser: import("puppeteer").Browser | null = null;
+      let browser: any = null;
       let releaseSemaphore: (() => void) | null = null;
 
       try {
         const puppeteer = await getPuppeteer();
 
         releaseSemaphore = await puppeteerSemaphore.acquire();
-        browser = await puppeteer.launch({
-          headless: true,
-          args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-        });
+        browser = await puppeteer.launch(buildPuppeteerLaunchOptions());
 
         const page = await browser.newPage();
         await page.setViewport({ width: 1440, height: 900 });

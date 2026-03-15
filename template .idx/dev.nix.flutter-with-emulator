@@ -26,7 +26,7 @@
 { pkgs, ... }: {
 
   # Gunakan channel stable untuk Flutter
-  channel = "stable";
+  channel = "stable-25.05";
 
   # ── Packages sistem ─────────────────────────────────────────────────────────
   packages = [
@@ -82,12 +82,10 @@
           # Jika kamu hanya mau emulator tanpa run Flutter app, hapus bagian ini
           # dan start emulator manual via onStart di bawah.
           command = [
-            "flutter"
-            "run"
-            "--machine"
-            "-d" "android"
-            "--pid-file" "/tmp/flutter-android-pid"
-          ];
+  "flutter" "run" "--machine"
+  "-d" "emulator-5554"
+  "--pid-file" "/tmp/flutter-android-pid"
+];
           manager = "flutter";
         };
       };

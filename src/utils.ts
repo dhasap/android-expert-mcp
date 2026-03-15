@@ -118,7 +118,7 @@ export async function buildDirectoryTree(
   if (currentDepth >= maxDepth) return indent + "  ... (max depth reached)\n";
 
   let result = "";
-  let entries: fs.Dirent[];
+  let entries;
 
   try {
     entries = await fs.readdir(dirPath, { withFileTypes: true });
@@ -127,7 +127,7 @@ export async function buildDirectoryTree(
   }
 
   // Sort: directories first, then files
-  entries.sort((a, b) => {
+  entries.sort((a: {isDirectory: () => boolean, name: string}, b: {isDirectory: () => boolean, name: string}) => {
     if (a.isDirectory() && !b.isDirectory()) return -1;
     if (!a.isDirectory() && b.isDirectory()) return 1;
     return a.name.localeCompare(b.name);
@@ -295,6 +295,45 @@ export class Semaphore {
  * All other requests queue here until a slot frees.
  */
 export const puppeteerSemaphore = new Semaphore(2);
+
+// ─── Puppeteer executable path helper ────────────────────────────────────────
+
+/**
+ * Get the path to the Chromium/Chrome executable.
+ * Respects PUPPETEER_EXECUTABLE_PATH environment variable,
+ * falls back to letting Puppeteer find its bundled Chromium.
+ */
+export function getPuppeteerExecutablePath(): string | undefined {
+  return process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+}
+
+/**
+ * Build standard Puppeteer launch options with optional overrides.
+ * Automatically includes PUPPETEER_EXECUTABLE_PATH if set.
+ */
+export function buildPuppeteerLaunchOptions(
+  extraArgs: string[] = [],
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  const executablePath = getPuppeteerExecutablePath();
+  const defaultArgs = [
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-accelerated-2d-canvas",
+    "--disable-gpu",
+    "--window-size=1920,1080",
+    "--disable-blink-features=AutomationControlled",
+    ...extraArgs,
+  ];
+
+  return {
+    headless: true,
+    ...(executablePath ? { executablePath } : {}),
+    args: defaultArgs,
+    ...overrides,
+  };
+}
 
 // ─── ADB global mutex (Fix #2 — prevent concurrent ADB server crashes) ───────
 
@@ -540,7 +579,7 @@ export async function cleanupTempDirectories(
       continue;
     }
 
-    let entries: fs.Dirent[];
+    let entries;
     try {
       entries = await fs.readdir(dirPath, { withFileTypes: true });
     } catch (err) {

@@ -110,6 +110,9 @@ cd android-expert-mcp
 npm install
 npm run build
 
+# Setup environment (wajib untuk Web Scraping, Audit, Browser)
+export PUPPETEER_EXECUTABLE_PATH=$(which chromium || which google-chrome)
+
 # Daftarkan ke Claude Code CLI
 claude mcp add android-expert --transport stdio node /absolute/path/to/android-expert-mcp/build/index.js
 
@@ -117,7 +120,8 @@ claude mcp add android-expert --transport stdio node /absolute/path/to/android-e
 kimi mcp add --transport stdio node /absolute/path/to/android-expert-mcp/build/index.js
 ```
 
-Lihat **[SETUP.md](SETUP.md)** untuk panduan lengkap termasuk setup GITHUB_TOKEN dan Wireless ADB.
+Lihat **[SETUP.md](SETUP.md)** untuk panduan lengkap termasuk setup GITHUB_TOKEN dan Wireless ADB.  
+Lihat **[PUPPETEER_SETUP_GUIDE.md](PUPPETEER_SETUP_GUIDE.md)** untuk setup Chrome/Chromium (Web Scraping, Audit, Browser Control).
 
 ---
 
@@ -146,6 +150,7 @@ android-expert-mcp/
 ├── SETUP.md
 ├── TOOLS_REFERENCE.md
 ├── IDX_FIREBASE_GUIDE.md
+├── PUPPETEER_SETUP_GUIDE.md  # 🆕 Setup Chrome/Chromium
 └── README.md
 ```
 

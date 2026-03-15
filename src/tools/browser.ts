@@ -19,7 +19,7 @@ import { z } from "zod";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
-import { formatToolError, ensureDir } from "../utils.js";
+import { formatToolError, ensureDir, buildPuppeteerLaunchOptions } from "../utils.js";
 
 // ─── Session Manager ──────────────────────────────────────────────────────────
 // Menyimpan browser instances agar AI bisa lanjut dari session yang sama
@@ -246,23 +246,17 @@ export function registerBrowserTools(server: McpServer): void {
           }
 
           // Buat session baru
-          const browser = await puppeteer.default.launch({
-            headless: true,
-            args: [
-              "--no-sandbox",
-              "--disable-setuid-sandbox",
-              "--disable-dev-shm-usage",
-              "--disable-gpu",
-              "--disable-web-security",
-              "--disable-features=VizDisplayCompositor",
-              ...(stealth
-                ? [
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-extensions",
-                  ]
-                : []),
-            ],
-          });
+          const extraArgs = [
+            "--disable-web-security",
+            "--disable-features=VizDisplayCompositor",
+            ...(stealth
+              ? [
+                  "--disable-blink-features=AutomationControlled",
+                  "--disable-extensions",
+                ]
+              : []),
+          ];
+          const browser = await puppeteer.default.launch(buildPuppeteerLaunchOptions(extraArgs));
 
           const page = await browser.newPage();
           await page.setViewport(vp);
