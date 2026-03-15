@@ -1,4 +1,4 @@
-# 📦 SETUP.md — Panduan Instalasi & Konfigurasi v5.0
+# 📦 SETUP.md — Panduan Instalasi & Konfigurasi v5.3
 
 > Setup lengkap **Android Expert MCP Server** untuk Kimi CLI, Claude Code, atau agen MCP lainnya.
 
@@ -174,6 +174,157 @@ adb shell ip addr show wlan0 | grep "inet "
 ```
 
 > 💡 **Tips**: HP dan laptop harus di jaringan WiFi yang sama!
+
+---
+
+## 🔌 Langkah 7 — Connect Android Emulator di IDX Firebase Studio
+
+> Panduan khusus untuk menghubungkan Android Emulator yang sudah berjalan di **IDX Firebase Studio** (Flutter workspace).
+
+### 🎯 Overview
+
+Di IDX Firebase Studio, emulator Android sudah dikelola oleh Flutter preview. **TIDAK perlu** membuat AVD baru atau start emulator manual. Cukup connect via ADB ke emulator yang sudah running.
+
+### ⚠️ ATURAN PENTING
+
+| ❌ JANGAN | ✅ LAKUKAN |
+|-----------|-----------|
+| `avdmanager` / `emulator` | `adb devices` untuk cek status |
+| Install system image baru | `adb tcpip 5555` untuk enable TCP mode |
+| Download image | Connect via `localhost:5555` |
+
+**⚡ Disk space di IDX terbatas (~4-5GB), jangan download image baru!**
+
+### 📋 Step-by-Step
+
+#### Step 1: Verifikasi Emulator Running
+
+```bash
+adb devices -l
+```
+
+**Yang diharapkan:**
+```
+List of devices attached
+emulator-5554          device product:sdk_gphone64_x86_64
+```
+
+**Jika status "unauthorized":**
+> Dialog "Allow USB debugging?" muncul di layar emulator tapi belum diklik!
+> Lihat bagian [🔐 USB Debugging Authorization](#-usb-debugging-authorization-idx) di bawah.
+
+**Jika status "offline":** Tunggu 30 detik, emulator masih booting.
+
+**Jika "no devices":** Emulator belum running — cek tab Flutter Preview.
+
+---
+
+#### 🔐 USB Debugging Authorization (IDX)
+
+Emulator di IDX berjalan **headless** (`-no-window`), jadi dialog tidak terlihat langsung.
+
+**Cara Mengakses Layar Emulator:**
+
+**Opsi 1: Via Tab Flutter Preview (Recommended)**
+1. Di sidebar kiri IDX, cari tab **"Flutter"** atau **"Flutter Preview"**
+2. Klik icon **📱 Device** atau **"Open Emulator"**
+3. Akan muncul preview layar emulator
+4. Klik tombol **"Allow"** pada dialog "Allow USB debugging?"
+
+**Opsi 2: Via Port Forwarding**
+1. Buka tab **"Ports"** di panel bawah IDX
+2. Forward port `5554` (emulator console)
+3. Buka URL-nya untuk melihat layar emulator
+4. Klik **"Allow"** pada dialog USB debugging
+
+**Verifikasi Setelah Klik Allow:**
+```bash
+adb devices -l
+```
+Harus menunjukkan status `device`:
+```
+emulator-5554          device product:sdk_gphone64_x86_64
+```
+
+---
+
+#### Step 2: Enable TCP/IP Mode
+
+MCP Tools memerlukan koneksi TCP/IP. Aktifkan TCP mode:
+
+```bash
+# Enable TCP mode di port 5555
+adb -s emulator-5554 tcpip 5555
+
+# Connect ke port TCP
+adb connect localhost:5555
+```
+
+**Verifikasi:**
+```bash
+adb devices -l
+```
+
+Output harus menunjukkan 2 koneksi:
+```
+emulator-5554          device product:sdk_gphone64_x86_64...
+localhost:5555         device product:sdk_gphone64_x86_64...
+```
+
+---
+
+#### Step 3: Connect via MCP Tools
+
+```bash
+# Via terminal
+idx_connect_emulator(host="localhost", port=5555)
+
+# Atau auto-detect
+idx_detect_emulator(auto_connect=true)
+```
+
+**Verifikasi berhasil:**
+```
+✅ Terhubung ke localhost:5555
+✅ Emulator siap! (boot dalam Xs)
+📱 Model   : sdk_gphone64_x86_64
+📱 Android : 16 (API 36)
+📱 Serial  : localhost:5555
+```
+
+---
+
+#### Step 4: Verifikasi dengan Screenshot
+
+```bash
+# Via MCP Tools
+emulator_screenshot(device_serial="localhost:5555")
+
+# Atau UI Dump
+emulator_ui_dump(device_serial="localhost:5555")
+```
+
+---
+
+### 🔧 Troubleshooting IDX Emulator
+
+| Error | Solusi |
+|-------|--------|
+| `unauthorized` | **Buka tab Flutter Preview → Klik "Allow" pada dialog USB debugging** |
+| `failed to authenticate to localhost:5555` | Klik "Allow USB debugging" di emulator preview dulu |
+| `offline` | Tunggu 30s (booting), lalu coba lagi |
+| `null root node returned` | Animasi loading, tunggu 3-5 detik lalu retry |
+| `no devices/emulator` | Emulator belum di-enable TCP mode (`adb tcpip 5555`) |
+
+### 🏗️ Info Emulator Default IDX
+
+| Property | Value |
+|----------|-------|
+| Device | sdk_gphone64 x86_64 |
+| Android | API 36 (Android 16) |
+| ADB Address | emulator-5554 (local) / localhost:5555 (TCP) |
+| Resolution | 1080x1920 (440 DPI) |
+| Mode | Headless (`-no-window`) |
 
 ---
 
