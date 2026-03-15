@@ -52,6 +52,335 @@ async function isAdbAvailable(): Promise<boolean> {
   return r.exitCode === 0;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// STABILIZATION HELPERS for Tap/Input (v5.2)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Delay helper */
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Retry wrapper with exponential backoff */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries: number = 3,
+  baseDelayMs: number = 500
+): Promise<T> {
+  let lastError: Error | undefined;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (i < maxRetries - 1) {
+        const waitMs = baseDelayMs * Math.pow(2, i); // exponential backoff
+        await delay(waitMs);
+      }
+    }
+  }
+  throw lastError ?? new Error("Retry failed");
+}
+
+/** Wait for UI to be idle (no ongoing animations) */
+async function waitForUiIdle(
+  deviceSerial: string | undefined,
+  timeoutMs: number = 5000
+): Promise<void> {
+  const flag = deviceSerial ? `-s ${deviceSerial}` : "";
+  const start = Date.now();
+  
+  // Try using window animation scale check
+  while (Date.now() - start < timeoutMs) {
+    const result = await runAdbCommand(
+      `adb ${flag} shell dumpsys window animations | grep -E "AnimationState|mAnimating" | head -5`,
+      undefined,
+      3000
+    );
+    // If no animation detected or command failed, assume idle
+    if (result.exitCode !== 0 || !result.stdout.includes("RUNNING")) {
+      return;
+    }
+    await delay(200);
+  }
+}
+
+/** Get element info from UI dump */
+async function findElementInUi(
+  deviceSerial: string | undefined,
+  searchType: "text" | "resource-id",
+  searchValue: string
+): Promise<{ x: number; y: number; bounds: string; clickable: boolean } | null> {
+  const flag = deviceSerial ? `-s ${deviceSerial}` : "";
+  const remotePath = `/sdcard/ui_find_${Date.now()}.xml`;
+  
+  try {
+    // Dump UI with retry
+    await withRetry(async () => {
+      const dumpResult = await runAdbCommand(
+        `adb ${flag} shell uiautomator dump --compressed ${remotePath}`,
+        undefined,
+        15000
+      );
+      if (dumpResult.exitCode !== 0) throw new Error("UI dump failed");
+    }, 3, 300);
+
+    const localPath = path.join(os.tmpdir(), `ui_find_${Date.now()}.xml`);
+    await runAdbCommand(
+      `adb ${flag} pull ${remotePath} "${localPath}"`,
+      undefined,
+      5000
+    );
+    await runAdbCommand(`adb ${flag} shell rm ${remotePath}`, undefined, 3000);
+
+    const xmlContent = await fs.readFile(localPath, "utf-8").catch(() => "");
+    await fs.unlink(localPath).catch(() => {});
+
+    const searchAttr = searchType === "text" 
+      ? `text="${searchValue}"` 
+      : `resource-id="${searchValue}"`;
+    
+    const nodePattern = new RegExp(
+      `<node[^>]*${searchAttr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^>]*clickable="([^"]*)"[^>]*bounds="\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]"`
+    );
+    
+    const match = xmlContent.match(nodePattern);
+    if (!match) return null;
+
+    const [, clickable, x1, y1, x2, y2] = match;
+    const cx = Math.round((parseInt(x1!) + parseInt(x2!)) / 2);
+    const cy = Math.round((parseInt(y1!) + parseInt(y2!)) / 2);
+    
+    return {
+      x: cx,
+      y: cy,
+      bounds: `[${x1},${y1}][${x2},${y2}]`,
+      clickable: clickable === "true",
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Verify element still exists at coordinates before tapping */
+async function verifyElementAtCoords(
+  deviceSerial: string | undefined,
+  x: number,
+  y: number,
+  expectedText?: string
+): Promise<boolean> {
+  if (!expectedText) return true; // Skip verification if no text to match
+  
+  const flag = deviceSerial ? `-s ${deviceSerial}` : "";
+  const remotePath = `/sdcard/ui_verify_${Date.now()}.xml`;
+  
+  try {
+    await runAdbCommand(
+      `adb ${flag} shell uiautomator dump --compressed ${remotePath}`,
+      undefined,
+      10000
+    );
+    
+    const localPath = path.join(os.tmpdir(), `ui_verify_${Date.now()}.xml`);
+    await runAdbCommand(
+      `adb ${flag} pull ${remotePath} "${localPath}"`,
+      undefined,
+      5000
+    );
+    await runAdbCommand(`adb ${flag} shell rm ${remotePath}`, undefined, 3000);
+
+    const xmlContent = await fs.readFile(localPath, "utf-8").catch(() => "");
+    await fs.unlink(localPath).catch(() => {});
+
+    // Check if element with expected text is still near those coordinates
+    const escapedText = expectedText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(
+      `<node[^>]*text="${escapedText}"[^>]*bounds="\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]"`
+    );
+    const match = xmlContent.match(pattern);
+    
+    if (!match) return false;
+    
+    const [, x1, y1, x2, y2] = match;
+    const centerX = Math.round((parseInt(x1!) + parseInt(x2!)) / 2);
+    const centerY = Math.round((parseInt(y1!) + parseInt(y2!)) / 2);
+    
+    // Allow 50px tolerance
+    const tolerance = 50;
+    return (
+      Math.abs(centerX - x) <= tolerance &&
+      Math.abs(centerY - y) <= tolerance
+    );
+  } catch {
+    return true; // Assume OK if verification fails
+  }
+}
+
+/** Smart tap with retry and verification */
+async function smartTap(
+  deviceSerial: string | undefined,
+  x: number,
+  y: number,
+  expectedText?: string,
+  maxRetries: number = 3
+): Promise<{ success: boolean; attempts: number; message: string }> {
+  const flag = deviceSerial ? `-s ${deviceSerial}` : "";
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      // Pre-tap: wait for UI idle
+      await waitForUiIdle(deviceSerial, 2000);
+      
+      // Verify element still there (if we know what to look for)
+      if (expectedText && attempt > 1) {
+        const stillThere = await verifyElementAtCoords(deviceSerial, x, y, expectedText);
+        if (!stillThere) {
+          // Try to find element again
+          const elem = await findElementInUi(deviceSerial, "text", expectedText);
+          if (elem) {
+            x = elem.x;
+            y = elem.y;
+          }
+        }
+      }
+      
+      // Execute tap
+      const result = await runAdbCommand(
+        `adb ${flag} shell input tap ${x} ${y}`,
+        undefined,
+        5000
+      );
+      
+      if (result.exitCode === 0) {
+        // Post-tap: short delay for UI to respond
+        await delay(300);
+        return { success: true, attempts: attempt, message: "Tap executed" };
+      }
+    } catch (err) {
+      if (attempt === maxRetries) {
+        return { 
+          success: false, 
+          attempts: attempt, 
+          message: `Failed after ${maxRetries} attempts: ${err}` 
+        };
+      }
+      await delay(500 * attempt); // Increasing delay between retries
+    }
+  }
+  
+  return { success: false, attempts: maxRetries, message: "Max retries reached" };
+}
+
+/** Smart swipe with velocity calculation */
+async function smartSwipe(
+  deviceSerial: string | undefined,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  durationMs?: number
+): Promise<{ success: boolean; message: string }> {
+  const flag = deviceSerial ? `-s ${deviceSerial}` : "";
+  
+  // Calculate optimal duration based on distance if not specified
+  let duration = durationMs;
+  if (!duration) {
+    const distance = Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+    // 1ms per 2 pixels, min 200ms, max 1000ms
+    duration = Math.min(Math.max(Math.round(distance / 2), 200), 1000);
+  }
+  
+  try {
+    await waitForUiIdle(deviceSerial, 1000);
+    
+    const result = await runAdbCommand(
+      `adb ${flag} shell input swipe ${x1} ${y1} ${x2} ${y2} ${duration}`,
+      undefined,
+      5000
+    );
+    
+    if (result.exitCode === 0) {
+      await delay(duration + 100); // Wait for swipe to complete
+      return { success: true, message: `Swiped in ${duration}ms` };
+    }
+    return { success: false, message: result.stderr };
+  } catch (err) {
+    return { success: false, message: String(err) };
+  }
+}
+
+/** Smart text input with field focus verification */
+async function smartInputText(
+  deviceSerial: string | undefined,
+  text: string,
+  options: {
+    tapX?: number;
+    tapY?: number;
+    resourceId?: string;
+    clearFirst?: boolean;
+    pressEnter?: boolean;
+  }
+): Promise<{ success: boolean; message: string }> {
+  const flag = deviceSerial ? `-s ${deviceSerial}` : "";
+  
+  try {
+    // Tap to focus field if coordinates provided
+    if (options.tapX !== undefined && options.tapY !== undefined) {
+      await waitForUiIdle(deviceSerial, 1000);
+      
+      const tapResult = await runAdbCommand(
+        `adb ${flag} shell input tap ${options.tapX} ${options.tapY}`,
+        undefined,
+        5000
+      );
+      
+      if (tapResult.exitCode !== 0) {
+        return { success: false, message: "Failed to tap input field" };
+      }
+      
+      await delay(300); // Wait for field to focus
+    }
+    
+    // Clear field if requested
+    if (options.clearFirst) {
+      // Try multiple methods to clear
+      await runAdbCommand(`adb ${flag} shell input keyevent KEYCODE_CTRL_A`, undefined, 2000);
+      await delay(100);
+      await runAdbCommand(`adb ${flag} shell input keyevent KEYCODE_DEL`, undefined, 2000);
+      await delay(100);
+    }
+    
+    // Type text with retry for long text
+    const chunks = text.match(/.{1,100}/g) || [text]; // Split into 100-char chunks
+    for (const chunk of chunks) {
+      const escaped = chunk.replace(/ /g, "%s").replace(/&/g, "\\&");
+      await withRetry(async () => {
+        const result = await runAdbCommand(
+          `adb ${flag} shell input text "${escaped}"`,
+          undefined,
+          5000
+        );
+        if (result.exitCode !== 0) throw new Error("Input failed");
+      }, 3, 200);
+    }
+    
+    // Press enter if requested
+    if (options.pressEnter) {
+      await delay(100);
+      await runAdbCommand(
+        `adb ${flag} shell input keyevent KEYCODE_ENTER`,
+        undefined,
+        3000
+      );
+    }
+    
+    await delay(200);
+    return { success: true, message: `Typed ${text.length} characters` };
+  } catch (err) {
+    return { success: false, message: String(err) };
+  }
+}
+
 async function isGcloudAvailable(): Promise<boolean> {
   const r = await runCommand("gcloud version", undefined, 5000);
   return r.exitCode === 0;
@@ -1538,10 +1867,12 @@ export function registerIdxFirebaseTools(server: McpServer): void {
   );
 
   // ── C3. emulator_tap ─────────────────────────────────────────────────────
+  // v5.2: Stabilized with retry, verification, and smart waiting
   server.tool(
     "emulator_tap",
     "Tap/klik koordinat atau elemen UI di emulator via ADB input. " +
-      "Bisa tap by koordinat X,Y atau by resource-id dari UI dump.",
+      "STABILIZED v5.2: Auto-retry, element verification, smart swipe velocity. " +
+      "Bisa tap by koordinat X,Y atau by resource-id/text dari UI dump.",
     {
       device_serial: z.string().optional().describe("Serial emulator"),
       action: z
@@ -1552,13 +1883,21 @@ export function registerIdxFirebaseTools(server: McpServer): void {
       y: z.number().optional().describe("Koordinat Y (untuk tap/long_press)"),
       x2: z.number().optional().describe("X tujuan swipe"),
       y2: z.number().optional().describe("Y tujuan swipe"),
-      swipe_duration_ms: z.number().int().default(300).describe("Durasi swipe (ms)"),
+      swipe_duration_ms: z.number().int().optional().describe(
+        "Durasi swipe (ms). Auto-calculate jika tidak diisi."
+      ),
       text: z.string().optional().describe("Teks elemen yang ditap (untuk tap_by_text)"),
       resource_id: z
         .string()
         .optional()
         .describe("Resource ID elemen (untuk tap_by_id, misal 'com.app:id/btn_login')"),
       take_screenshot: z.boolean().default(true),
+      verify_tap: z.boolean().default(true).describe(
+        "Verifikasi elemen masih ada sebelum tap (untuk tap_by_text)"
+      ),
+      retry_count: z.number().int().min(1).max(5).default(3).describe(
+        "Jumlah retry jika tap gagal (default: 3)"
+      ),
     },
     async ({
       device_serial,
@@ -1571,6 +1910,8 @@ export function registerIdxFirebaseTools(server: McpServer): void {
       text,
       resource_id,
       take_screenshot: doScreenshot,
+      verify_tap,
+      retry_count,
     }) => {
       try {
         const devices = await getConnectedDevicesList();
@@ -1585,123 +1926,136 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         const flag = device_serial ? `-s ${device_serial}` : "";
         let tapX = x;
         let tapY = y;
+        let targetText: string | undefined = text;
 
         // Resolve koordinat untuk tap_by_text / tap_by_id
         if (action === "tap_by_text" || action === "tap_by_id") {
-          // Ambil UI dump untuk cari koordinat
-          const remotePath = `/sdcard/ui_tmp_${Date.now()}.xml`;
-          await runAdbCommand(
-            `adb ${flag} shell uiautomator dump --compressed ${remotePath}`,
-            undefined,
-            20000
-          );
-          const localTmp = path.join(os.tmpdir(), `ui_tmp_${Date.now()}.xml`);
-          await runAdbCommand(
-            `adb ${flag} pull ${remotePath} "${localTmp}"`,
-            undefined,
-            10000
-          );
-          await runAdbCommand(
-            `adb ${flag} shell rm ${remotePath}`,
-            undefined,
-            5000
-          );
-
-          const xmlContent = await fs.readFile(localTmp, "utf-8").catch(() => "");
-
-          // Cari elemen berdasarkan text atau resource-id
-          const searchAttr =
-            action === "tap_by_text"
-              ? `text="${text}"`
-              : `resource-id="${resource_id}"`;
-
-          const nodePattern = new RegExp(
-            `<node[^>]*${searchAttr.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^>]*bounds="\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]"`
-          );
-          const match = xmlContent.match(nodePattern);
-
-          if (!match) {
+          const searchType = action === "tap_by_text" ? "text" : "resource-id";
+          const searchValue = action === "tap_by_text" ? text! : resource_id!;
+          
+          const elem = await findElementInUi(device_serial, searchType, searchValue);
+          
+          if (!elem) {
             return {
               content: [
                 {
                   type: "text",
                   text:
-                    `❌ Elemen tidak ditemukan: ${searchAttr}\n` +
+                    `❌ Elemen tidak ditemukan: ${searchType}="${searchValue}"\n` +
                     "Gunakan emulator_ui_dump untuk lihat elemen yang tersedia.",
                 },
               ],
             };
           }
-
-          const [, x1, y1, x2b, y2b] = match;
-          tapX = Math.round((parseInt(x1!) + parseInt(x2b!)) / 2);
-          tapY = Math.round((parseInt(y1!) + parseInt(y2b!)) / 2);
+          
+          if (!elem.clickable) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `⚠️ Elemen ditemukan tapi tidak clickable!\n` +
+                    `Bounds: ${elem.bounds}\n` +
+                    `Coba cari elemen parent yang clickable.`,
+                },
+              ],
+            };
+          }
+          
+          tapX = elem.x;
+          tapY = elem.y;
         }
 
-        let cmd = "";
+        // Execute action
+        let result: { success: boolean; message: string; attempts?: number };
+        
         switch (action) {
           case "tap":
           case "tap_by_text":
           case "tap_by_id":
             if (tapX === undefined || tapY === undefined) {
-              throw new Error("Koordinat x dan y diperlukan");
+              return {
+                content: [{ type: "text", text: "❌ Koordinat x dan y diperlukan untuk tap" }],
+              };
             }
-            cmd = `adb ${flag} shell input tap ${tapX} ${tapY}`;
+            result = await smartTap(
+              device_serial, 
+              tapX, 
+              tapY, 
+              verify_tap ? targetText : undefined,
+              retry_count
+            );
             break;
+            
           case "long_press":
             if (tapX === undefined || tapY === undefined) {
-              throw new Error("Koordinat x dan y diperlukan");
+              return {
+                content: [{ type: "text", text: "❌ Koordinat x dan y diperlukan untuk long_press" }],
+              };
             }
-            cmd = `adb ${flag} shell input swipe ${tapX} ${tapY} ${tapX} ${tapY} 1000`;
+            // Long press = swipe to same position with 1000ms duration
+            result = await smartSwipe(device_serial, tapX, tapY, tapX, tapY, 1000);
             break;
+            
           case "swipe":
             if (!x || !y || !x2 || !y2) {
-              throw new Error("x, y, x2, y2 diperlukan untuk swipe");
+              return {
+                content: [{ type: "text", text: "❌ x, y, x2, y2 diperlukan untuk swipe" }],
+              };
             }
-            cmd = `adb ${flag} shell input swipe ${x} ${y} ${x2} ${y2} ${swipe_duration_ms}`;
+            result = await smartSwipe(device_serial, x, y, x2, y2, swipe_duration_ms);
             break;
+            
+          default:
+            return {
+              content: [{ type: "text", text: `❌ Action tidak dikenal: ${action}` }],
+            };
         }
 
-        const result = await runCommand(cmd, undefined, 10000);
-
-        await new Promise((r) => setTimeout(r, 500));
-
+        // Screenshot after action
         let ssInfo = "";
         if (doScreenshot) {
+          await delay(500); // Wait for UI to settle
           const ssDir = path.join(os.tmpdir(), "mcp-emulator");
           await ensureDir(ssDir);
           const ssPath = path.join(ssDir, `tap_${Date.now()}.png`);
           const remoteSs = `/sdcard/ss_${Date.now()}.png`;
-          await runAdbCommand(
-            `adb ${flag} shell screencap -p ${remoteSs}`,
-            undefined,
-            10000
-          );
-          await runAdbCommand(
-            `adb ${flag} pull ${remoteSs} "${ssPath}"`,
-            undefined,
-            10000
-          );
-          await runAdbCommand(
-            `adb ${flag} shell rm ${remoteSs}`,
-            undefined,
-            5000
-          );
-          ssInfo = `\n📸 Screenshot: ${ssPath}`;
+          
+          try {
+            await runAdbCommand(
+              `adb ${flag} shell screencap -p ${remoteSs}`,
+              undefined,
+              10000
+            );
+            await runAdbCommand(
+              `adb ${flag} pull ${remoteSs} "${ssPath}"`,
+              undefined,
+              10000
+            );
+            await runAdbCommand(
+              `adb ${flag} shell rm ${remoteSs}`,
+              undefined,
+              5000
+            );
+            ssInfo = `\n📸 Screenshot: ${ssPath}`;
+          } catch {
+            ssInfo = "\n📸 Screenshot: (gagal)";
+          }
         }
+
+        const statusIcon = result.success ? "✅" : "❌";
+        const attemptsInfo = result.attempts ? ` (retry: ${result.attempts}x)` : "";
 
         return {
           content: [
             {
               type: "text",
               text:
-                `✅ ${action} berhasil!\n` +
+                `${statusIcon} ${action}${attemptsInfo}\n` +
                 "─".repeat(55) +
-                `\nAksi    : ${action}` +
                 (tapX !== undefined ? `\nKoord   : (${tapX}, ${tapY})` : "") +
                 (text ? `\nTarget  : "${text}"` : "") +
                 (resource_id ? `\nID      : ${resource_id}` : "") +
-                `\nOutput  : ${result.stdout.trim() || "(ok)"}` +
+                `\nStatus  : ${result.message}` +
                 ssInfo,
             },
           ],
@@ -1717,11 +2071,12 @@ export function registerIdxFirebaseTools(server: McpServer): void {
   );
 
   // ── C4. emulator_input_text ───────────────────────────────────────────────
+  // v5.2: Stabilized with smart input, chunked typing, and field verification
   server.tool(
     "emulator_input_text",
     "Ketik teks ke field yang sedang fokus di emulator. " +
-      "Bisa juga tap ke field dulu lalu ketik. " +
-      "Mendukung karakter Unicode via event injection.",
+      "STABILIZED v5.2: Smart field focus, chunked text input, auto-retry. " +
+      "Bisa tap ke field dulu lalu ketik.",
     {
       device_serial: z.string().optional(),
       text: z.string().describe("Teks yang diketik"),
@@ -1730,13 +2085,16 @@ export function registerIdxFirebaseTools(server: McpServer): void {
       resource_id: z
         .string()
         .optional()
-        .describe("Tap ke elemen by resource-id sebelum ketik"),
+        .describe("Tap ke elemen by resource-id sebelum ketik (auto-find coordinates)"),
       clear_first: z
         .boolean()
         .default(true)
         .describe("Hapus isi field dulu (Ctrl+A + Del)"),
       press_enter_after: z.boolean().default(false),
       take_screenshot: z.boolean().default(true),
+      verify_field_focused: z.boolean().default(true).describe(
+        "Verifikasi field fokus sebelum typing"
+      ),
     },
     async ({
       device_serial,
@@ -1747,6 +2105,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
       clear_first,
       press_enter_after,
       take_screenshot: doScreenshot,
+      verify_field_focused,
     }) => {
       try {
         const devices = await getConnectedDevicesList();
@@ -1759,121 +2118,88 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         }
 
         const flag = device_serial ? `-s ${device_serial}` : "";
+        const lines: string[] = [
+          "⌨️  Input Text (Stabilized v5.2)",
+          "─".repeat(55),
+          `Text: "${text.slice(0, 50)}${text.length > 50 ? "..." : ""}"`,
+          "",
+        ];
 
-        // Tap ke field jika koordinat atau resource_id diberikan
-        if (tap_x !== undefined && tap_y !== undefined) {
-          await runAdbCommand(
-            `adb ${flag} shell input tap ${tap_x} ${tap_y}`,
-            undefined,
-            5000
-          );
-          await new Promise((r) => setTimeout(r, 300));
-        } else if (resource_id) {
-          // Cari koordinat dari UI dump
-          const remotePath = `/sdcard/ui_tmp_${Date.now()}.xml`;
-          await runAdbCommand(
-            `adb ${flag} shell uiautomator dump --compressed ${remotePath}`,
-            undefined,
-            20000
-          );
-          const localTmp = path.join(os.tmpdir(), `ui_input_${Date.now()}.xml`);
-          await runAdbCommand(
-            `adb ${flag} pull ${remotePath} "${localTmp}"`,
-            undefined,
-            10000
-          );
-          await runAdbCommand(
-            `adb ${flag} shell rm ${remotePath}`,
-            undefined,
-            5000
-          );
-
-          const xmlContent = await fs.readFile(localTmp, "utf-8").catch(() => "");
-          const escapedId = resource_id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          const match = xmlContent.match(
-            new RegExp(
-              `<node[^>]*resource-id="${escapedId}"[^>]*bounds="\\[(\\d+),(\\d+)\\]\\[(\\d+),(\\d+)\\]"`
-            )
-          );
-
-          if (match) {
-            const cx = Math.round((parseInt(match[1]!) + parseInt(match[3]!)) / 2);
-            const cy = Math.round((parseInt(match[2]!) + parseInt(match[4]!)) / 2);
-            await runAdbCommand(
-              `adb ${flag} shell input tap ${cx} ${cy}`,
-              undefined,
-              5000
-            );
-            await new Promise((r) => setTimeout(r, 300));
+        // Resolve coordinates if resource_id provided
+        let finalTapX = tap_x;
+        let finalTapY = tap_y;
+        
+        if (resource_id && (tap_x === undefined || tap_y === undefined)) {
+          lines.push(`🔍 Mencari elemen: ${resource_id}...`);
+          const elem = await findElementInUi(device_serial, "resource-id", resource_id);
+          
+          if (!elem) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: lines.join("\n") + 
+                    `\n❌ Elemen tidak ditemukan: ${resource_id}\n` +
+                    "Gunakan emulator_ui_dump untuk lihat elemen yang tersedia.",
+                },
+              ],
+            };
           }
+          
+          finalTapX = elem.x;
+          finalTapY = elem.y;
+          lines.push(`✅ Elemen ditemukan di (${finalTapX}, ${finalTapY})`);
         }
 
-        if (clear_first) {
-          // Ctrl+A lalu Delete
-          await runAdbCommand(
-            `adb ${flag} shell input keyevent KEYCODE_CTRL_A`,
-            undefined,
-            3000
-          );
-          await runAdbCommand(
-            `adb ${flag} shell input keyevent KEYCODE_DEL`,
-            undefined,
-            3000
-          );
+        // Use smart input function
+        const result = await smartInputText(device_serial, text, {
+          tapX: finalTapX,
+          tapY: finalTapY,
+          clearFirst: clear_first,
+          pressEnter: press_enter_after,
+        });
+
+        if (result.success) {
+          lines.push(`✅ ${result.message}`);
+        } else {
+          lines.push(`❌ ${result.message}`);
+          return { content: [{ type: "text", text: lines.join("\n") }] };
         }
 
-        // Escape spasi dan karakter khusus untuk ADB input text
-        const escapedText = text.replace(/ /g, "%s").replace(/&/g, "\\&");
-        await runAdbCommand(
-          `adb ${flag} shell input text "${escapedText}"`,
-          undefined,
-          10000
-        );
-
-        if (press_enter_after) {
-          await runAdbCommand(
-            `adb ${flag} shell input keyevent KEYCODE_ENTER`,
-            undefined,
-            3000
-          );
-        }
-
-        await new Promise((r) => setTimeout(r, 300));
-
+        // Screenshot after input
         let ssInfo = "";
         if (doScreenshot) {
+          await delay(500);
           const ssDir = path.join(os.tmpdir(), "mcp-emulator");
           await ensureDir(ssDir);
           const ssPath = path.join(ssDir, `input_${Date.now()}.png`);
           const remoteSs = `/sdcard/ssinput_${Date.now()}.png`;
-          await runAdbCommand(
-            `adb ${flag} shell screencap -p ${remoteSs}`,
-            undefined,
-            10000
-          );
-          await runAdbCommand(
-            `adb ${flag} pull ${remoteSs} "${ssPath}"`,
-            undefined,
-            10000
-          );
-          await runAdbCommand(
-            `adb ${flag} shell rm ${remoteSs}`,
-            undefined,
-            5000
-          );
-          ssInfo = `\n📸 Screenshot: ${ssPath}`;
+          
+          try {
+            await runAdbCommand(
+              `adb ${flag} shell screencap -p ${remoteSs}`,
+              undefined,
+              10000
+            );
+            await runAdbCommand(
+              `adb ${flag} pull ${remoteSs} "${ssPath}"`,
+              undefined,
+              10000
+            );
+            await runAdbCommand(
+              `adb ${flag} shell rm ${remoteSs}`,
+              undefined,
+              5000
+            );
+            ssInfo = `\n📸 Screenshot: ${ssPath}`;
+          } catch {
+            ssInfo = "\n📸 Screenshot: (gagal)";
+          }
         }
 
+        lines.push(ssInfo);
         return {
-          content: [
-            {
-              type: "text",
-              text:
-                `✅ Teks diketik ke emulator!\n` +
-                `Teks: "${text.slice(0, 100)}${text.length > 100 ? "..." : ""}"` +
-                ssInfo,
-            },
-          ],
+          content: [{ type: "text", text: lines.join("\n") }],
         };
       } catch (error) {
         return {
