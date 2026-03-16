@@ -56,15 +56,26 @@ set PUPPETEER_EXECUTABLE_PATH=C:\Program Files\Google\Chrome\Application\chrome.
 
 ## 🚀 Setup di Berbagai Platform
 
-### 1. IDX / Nix Environment
+### 1. IDX / Nix Environment ⭐
+
+Chromium di IDX biasanya berada di **Nix store** dengan path unik:
 
 ```bash
-# Chromium biasanya sudah tersedia di path Nix
+# Cari lokasi Chromium di Nix store
+which chromium
+which chromium-browser
+
+# Contoh output:
+# /nix/store/lpdrfl6n16q5zdf8acp4bni7yczzcx3h-idx-builtins/bin/chromium
+
+# Set environment variable
 export PUPPETEER_EXECUTABLE_PATH="/nix/store/lpdrfl6n16q5zdf8acp4bni7yczzcx3h-idx-builtins/bin/chromium"
 
-# Atau gunakan which
+# Atau gunakan which untuk auto-detect
 export PUPPETEER_EXECUTABLE_PATH=$(which chromium)
 ```
+
+> 💡 **Tips IDX:** Path Nix store bisa berbeda tiap workspace. Selalu gunakan `which chromium` untuk mendapatkan path yang benar.
 
 ### 2. Ubuntu/Debian
 
@@ -99,33 +110,6 @@ export PUPPETEER_EXECUTABLE_PATH="/Applications/Google Chrome.app/Contents/MacOS
 
 ---
 
-## 🧪 Testing Setup
-
-Setelah set environment variable, test dengan:
-
-```bash
-cd /path/to/android-expert-mcp
-npm run build
-
-# Test dengan Node.js
-export PUPPETEER_EXECUTABLE_PATH="/usr/bin/chromium"  # sesuaikan path
-node -e "
-const { buildPuppeteerLaunchOptions } = require('./build/utils.js');
-const puppeteer = require('puppeteer');
-
-(async () => {
-  const browser = await puppeteer.launch(buildPuppeteerLaunchOptions());
-  const page = await browser.newPage();
-  await page.goto('https://example.com');
-  console.log('Title:', await page.title());
-  await browser.close();
-  console.log('✅ Setup berhasil!');
-})();
-"
-```
-
----
-
 ## 🔌 Setup di Kimi CLI
 
 ### Opsi 1: Inline Environment Variable
@@ -141,7 +125,7 @@ export PUPPETEER_EXECUTABLE_PATH="/usr/bin/chromium"
 kimi
 ```
 
-### Opsi 3: MCP Config dengan Environment
+### Opsi 3: MCP Config dengan Environment (Recommended) ⭐
 
 Edit `~/.kimi/mcp.json`:
 
@@ -158,6 +142,24 @@ Edit `~/.kimi/mcp.json`:
   }
 }
 ```
+
+**Untuk IDX/Nix (contoh):**
+
+```json
+{
+  "mcpServers": {
+    "android-expert": {
+      "command": "node",
+      "args": ["/home/user/myapp/android-expert-mcp/build/index.js"],
+      "env": {
+        "PUPPETEER_EXECUTABLE_PATH": "/nix/store/lpdrfl6n16q5zdf8acp4bni7yczzcx3h-idx-builtins/bin/chromium"
+      }
+    }
+  }
+}
+```
+
+> ⚠️ **Penting:** Restart Kimi CLI setelah mengedit `mcp.json` agar perubahan diterapkan.
 
 ### Opsi 4: Wrapper Script
 
@@ -232,6 +234,15 @@ which chromium || which google-chrome
 export PUPPETEER_EXECUTABLE_PATH=$(which chromium)
 ```
 
+**Untuk IDX:**
+```bash
+# Cek apakah chromium ada di Nix store
+ls /nix/store/*/bin/chromium 2>/dev/null | head -1
+
+# Set ke path yang ditemukan
+export PUPPETEER_EXECUTABLE_PATH="/nix/store/.../bin/chromium"
+```
+
 ### Error: "No usable sandbox"
 
 **Solusi:**
@@ -263,13 +274,34 @@ export PUPPETEER_ARGS="--no-sandbox --disable-dev-shm-usage"
 
 ---
 
-## 📊 Verifikasi Semua Fitur Berfungsi
+## 🧪 Testing Setup
 
-Setelah setup, verifikasi dengan tools berikut:
+Setelah set environment variable, test dengan:
 
 ```bash
-# Di dalam Kimi CLI, jalankan:
+cd /path/to/android-expert-mcp
+npm run build
 
+# Test dengan Node.js
+export PUPPETEER_EXECUTABLE_PATH="/usr/bin/chromium"  # sesuaikan path
+node -e "
+const { buildPuppeteerLaunchOptions } = require('./build/utils.js');
+const puppeteer = require('puppeteer');
+
+(async () => {
+  const browser = await puppeteer.launch(buildPuppeteerLaunchOptions());
+  const page = await browser.newPage();
+  await page.goto('https://example.com');
+  console.log('Title:', await page.title());
+  await browser.close();
+  console.log('✅ Setup berhasil!');
+})();
+"
+```
+
+**Test di Kimi CLI:**
+
+```bash
 # 1. Test scraping
 scrape_page_html url="https://example.com"
 
@@ -297,7 +329,7 @@ browser_open url="https://example.com"
 
 ## ✅ Checklist Setup
 
-- [ ] Chrome/Chromium terinstall
+- [ ] Chrome/Chromium terinstall (`which chromium`)
 - [ ] `PUPPETEER_EXECUTABLE_PATH` di-set
 - [ ] Project di-build (`npm run build`)
 - [ ] MCP server terdaftar di Kimi CLI
@@ -315,5 +347,5 @@ browser_open url="https://example.com"
 
 ---
 
-**Versi Dokumen:** 1.0  
-**Terakhir Update:** 2026-03-15
+**Versi Dokumen:** 1.1  
+**Terakhir Update:** 2026-03-16
