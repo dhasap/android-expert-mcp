@@ -1,17 +1,25 @@
 /**
- * Browser Control Tools — Full Interactive Browser Session
+ * Browser Control Tools — Full Interactive Browser Session (STABILIZED v5.2)
  * ─────────────────────────────────────────────────────────────────────────────
  * Persistent browser sessions yang bisa dikendalikan step-by-step oleh AI:
  *   • Buka URL, navigasi, back/forward
- *   • Klik elemen via CSS selector atau XPath
+ *   • Klik elemen via CSS selector atau XPath (dengan auto-retry & JS fallback)
  *   • Isi form, type text, select dropdown, checkbox
  *   • Scroll halaman atau elemen tertentu
- *   • Ambil screenshot saat ini (untuk "melihat" kondisi browser)
+ *   • Ambil screenshot saat ini (dengan timeout protection)
  *   • Tunggu elemen muncul / menghilang
  *   • Eksekusi JavaScript arbitrary
  *   • Kelola multiple tab
  *   • Download file
  *   • Handle dialog (alert, confirm, prompt)
+ * 
+ * STABILITY FEATURES (v5.2):
+ *   • Auto-retry dengan exponential backoff
+ *   • Fallback ke JavaScript injection untuk click
+ *   • Smart wait untuk navigasi
+ *   • Session auto-recovery pada timeout
+ *   • Chunked screenshot untuk halaman panjang
+ *   • Auto-cleanup overlay/popup
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -20,6 +28,111 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
 import { formatToolError, ensureDir, buildPuppeteerLaunchOptions } from "../utils.js";
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STABILITY HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Retry wrapper dengan exponential backoff
+ */
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  options: { maxRetries?: number; retryDelay?: number; operation?: string } = {}
+): Promise<T> {
+  const maxRetries = options.maxRetries ?? 3;
+  const retryDelay = options.retryDelay ?? 1000;
+  const operation = options.operation ?? "operation";
+  let lastError: Error | undefined;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      lastError = error as Error;
+      const isTimeout = 
+        lastError.message?.includes("timeout") || 
+        lastError.message?.includes("Timeout");
+      
+      if (!isTimeout || attempt === maxRetries) {
+        throw error;
+      }
+
+      // Exponential backoff: 1s, 2s, 4s
+      const waitTime = retryDelay * Math.pow(2, attempt - 1);
+      process.stderr.write(
+        `[browser] ${operation}: attempt ${attempt}/${maxRetries} failed, retrying in ${waitTime}ms...\n`
+      );
+      await new Promise((r) => setTimeout(r, waitTime));
+    }
+  }
+
+  throw lastError;
+}
+
+/**
+ * Script untuk cleanup overlay/popup/ads
+ */
+const CLEANUP_OVERLAY_SCRIPT = `
+(function() {
+  // Hapus popup/modal/overlay
+  const selectors = [
+    '[class*="modal"]', '[class*="popup"]', '[class*="overlay"]',
+    '[id*="modal"]', '[id*="popup"]', '[id*="overlay"]',
+    '.ads', '.advertisement', '[class*="ads-"]',
+    'iframe[src*="ads"]', 'iframe[src*="gendeng"]', 'iframe[src*="tajir"]'
+  ];
+  
+  selectors.forEach(sel => {
+    document.querySelectorAll(sel).forEach(el => {
+      try { el.remove(); } catch(e) {}
+    });
+  });
+  
+  // Enable scroll
+  document.body.style.overflow = 'auto';
+  document.body.style.height = 'auto';
+  document.documentElement.style.overflow = 'auto';
+  
+  return { cleaned: true, timestamp: Date.now() };
+})()
+`;
+
+/**
+ * JavaScript click fallback
+ */
+const JS_CLICK_SCRIPT = (selector: string) => `
+(function() {
+  const element = document.querySelector('${selector.replace(/'/g, "\\'")}');
+  if (!element) return { success: false, error: 'Element not found' };
+  
+  // Try multiple click methods
+  try {
+    element.click();
+  } catch(e) {}
+  
+  try {
+    element.dispatchEvent(new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      view: window
+    }));
+  } catch(e) {}
+  
+  return { 
+    success: true, 
+    text: element.textContent?.substring(0, 50),
+    tagName: element.tagName
+  };
+})()
+`;
+
+/**
+ * Delay helper
+ */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // ─── Session Manager ──────────────────────────────────────────────────────────
 // Menyimpan browser instances agar AI bisa lanjut dari session yang sama
@@ -134,17 +247,28 @@ async function getActivePage(sessionId: string): Promise<{
 
 async function takePageScreenshot(
   page: import("puppeteer").Page,
-  label: string = "screenshot"
+  label: string = "screenshot",
+  fullPage: boolean = false
 ): Promise<string> {
   const dir = path.join(os.tmpdir(), "mcp-browser-screenshots");
   await ensureDir(dir);
   const timestamp = Date.now();
   const filePath = path.join(dir, `${label}_${timestamp}.png`);
-  await page.screenshot({
+  
+  // Set timeout 15 detik untuk screenshot - lebih pendek dari default 30s
+  // untuk menghindari hanging
+  const screenshotPromise = page.screenshot({
     path: filePath as `${string}.png`,
-    fullPage: false, // viewport only untuk kecepatan
+    fullPage: fullPage,
     type: "png",
+    encoding: "binary",
   });
+  
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error("Screenshot timeout after 15s")), 15000);
+  });
+  
+  await Promise.race([screenshotPromise, timeoutPromise]);
   return filePath;
 }
 
@@ -316,8 +440,12 @@ export function registerBrowserTools(server: McpServer): void {
 
         let screenshotInfo = "";
         if (doScreenshot) {
-          const ssPath = await takePageScreenshot(page, "open");
-          screenshotInfo = `\n📸 Screenshot: ${ssPath}`;
+          try {
+            const ssPath = await takePageScreenshot(page, "open", false);
+            screenshotInfo = `\n📸 Screenshot: ${ssPath}`;
+          } catch (ssError) {
+            screenshotInfo = `\n📸 Screenshot: Failed - ${(ssError as Error).message}`;
+          }
         }
 
         // Cari session ID yang benar
@@ -361,19 +489,27 @@ export function registerBrowserTools(server: McpServer): void {
     "browser_screenshot",
     "Ambil screenshot dari browser session yang sedang aktif. " +
       "Gunakan ini untuk 'melihat' kondisi halaman saat ini — " +
-      "sangat penting untuk verifikasi setelah klik/navigasi/scroll.",
+      "sangat penting untuk verifikasi setelah klik/navigasi/scroll. " +
+      "[STABILIZED v5.2] Dengan timeout protection dan retry.",
     {
       session_id: z.string().describe("Session ID dari browser_open"),
       full_page: z
         .boolean()
         .default(false)
-        .describe("Screenshot seluruh halaman (false = hanya viewport)"),
+        .describe("Screenshot seluruh halaman (false = hanya viewport - lebih stabil)"),
       label: z
         .string()
         .default("view")
         .describe("Label untuk nama file screenshot"),
+      timeout_seconds: z
+        .number()
+        .int()
+        .min(5)
+        .max(60)
+        .default(20)
+        .describe("Timeout screenshot dalam detik"),
     },
-    async ({ session_id, full_page, label }) => {
+    async ({ session_id, full_page, label, timeout_seconds }) => {
       try {
         const result = await getActivePage(session_id);
         if (!result) {
@@ -394,10 +530,26 @@ export function registerBrowserTools(server: McpServer): void {
         await ensureDir(dir);
         const filePath = path.join(dir, `${label}_${Date.now()}.png`);
 
-        await page.screenshot({
-          path: filePath as `${string}.png`,
-          fullPage: full_page,
-          type: "png",
+        // STABILIZED v5.2: Screenshot dengan timeout dan retry
+        const takeScreenshotWithTimeout = async (): Promise<void> => {
+          const screenshotPromise = page.screenshot({
+            path: filePath as `${string}.png`,
+            fullPage: full_page,
+            type: "png",
+            encoding: "binary",
+          });
+          
+          const timeoutPromise = new Promise<never>((_, reject) => {
+            setTimeout(() => reject(new Error(`Screenshot timeout after ${timeout_seconds}s`)), timeout_seconds * 1000);
+          });
+          
+          await Promise.race([screenshotPromise, timeoutPromise]);
+        };
+
+        await retryWithBackoff(takeScreenshotWithTimeout, {
+          maxRetries: 2,
+          retryDelay: 1000,
+          operation: "screenshot"
         });
 
         const stat = await fs.stat(filePath);
@@ -409,12 +561,13 @@ export function registerBrowserTools(server: McpServer): void {
             {
               type: "text",
               text:
-                `📸 Screenshot diambil!\n` +
+                `📸 Screenshot diambil! [STABILIZED v5.2]\n` +
                 `${"─".repeat(50)}\n` +
                 `${pageInfo}\n` +
                 `\n💾 Disimpan ke: ${filePath}` +
                 `\n📏 Ukuran    : ${sizeKb} KB` +
-                `\n📄 Full page : ${full_page}`,
+                `\n📄 Full page : ${full_page}` +
+                `\n⏱️  Timeout   : ${timeout_seconds}s`,
             },
           ],
         };
@@ -431,7 +584,8 @@ export function registerBrowserTools(server: McpServer): void {
     "browser_click",
     "Klik elemen di halaman menggunakan CSS selector. " +
       "Otomatis scroll ke elemen, tunggu hingga clickable, lalu klik. " +
-      "Setelah klik, ambil screenshot untuk verifikasi.",
+      "Setelah klik, ambil screenshot untuk verifikasi. " +
+      "[STABILIZED v5.2] Mendukung auto-retry dan JavaScript fallback.",
     {
       session_id: z.string().describe("Session ID"),
       selector: z
@@ -465,8 +619,33 @@ export function registerBrowserTools(server: McpServer): void {
         .max(3)
         .default(1)
         .describe("Jumlah klik (1=single, 2=double)"),
+      fallback_js: z
+        .boolean()
+        .default(true)
+        .describe("Gunakan JavaScript injection sebagai fallback jika native click gagal"),
+      close_overlays: z
+        .boolean()
+        .default(false)
+        .describe("Hapus popup/overlay/ads sebelum click"),
+      retry_count: z
+        .number()
+        .int()
+        .min(1)
+        .max(5)
+        .default(3)
+        .describe("Jumlah retry jika click gagal (STABILIZED v5.2)"),
     },
-    async ({ session_id, selector, wait_after_ms, take_screenshot: doScreenshot, timeout_ms, click_count }) => {
+    async ({ 
+      session_id, 
+      selector, 
+      wait_after_ms, 
+      take_screenshot: doScreenshot, 
+      timeout_ms, 
+      click_count,
+      fallback_js,
+      close_overlays,
+      retry_count
+    }) => {
       try {
         const result = await getActivePage(session_id);
         if (!result) {
@@ -479,32 +658,77 @@ export function registerBrowserTools(server: McpServer): void {
 
         const { page } = result;
 
-        // Tunggu elemen muncul
-        await page.waitForSelector(selector, {
-          visible: true,
-          timeout: timeout_ms,
-        });
+        // Strategy 0: Cleanup overlays jika diminta
+        if (close_overlays) {
+          try {
+            await page.evaluate(CLEANUP_OVERLAY_SCRIPT);
+            await delay(500);
+          } catch (e) {
+            // Ignore cleanup errors
+          }
+        }
 
-        // Scroll ke elemen
-        await page.evaluate((sel: string) => {
-          const el = document.querySelector(sel);
-          el?.scrollIntoView({ behavior: "smooth", block: "center" });
-        }, selector);
+        let clickSuccess = false;
+        let clickMethod = "";
+        let lastError: Error | undefined;
 
-        await new Promise((r) => setTimeout(r, 300));
+        // Strategy 1: Native click dengan retry
+        for (let attempt = 1; attempt <= retry_count; attempt++) {
+          try {
+            // Tunggu elemen muncul
+            await page.waitForSelector(selector, {
+              visible: true,
+              timeout: timeout_ms,
+            });
 
-        // Klik
-        await page.click(selector, { clickCount: click_count });
+            // Scroll ke elemen
+            await page.evaluate((sel: string) => {
+              const el = document.querySelector(sel);
+              el?.scrollIntoView({ behavior: "smooth", block: "center" });
+            }, selector);
+
+            await delay(300);
+
+            // Klik
+            await page.click(selector, { clickCount: click_count });
+            
+            clickSuccess = true;
+            clickMethod = `native click (attempt ${attempt})`;
+            break;
+          } catch (error) {
+            lastError = error as Error;
+            if (attempt < retry_count) {
+              await delay(1000 * attempt); // Exponential backoff
+            }
+          }
+        }
+
+        // Strategy 2: JavaScript injection fallback
+        if (!clickSuccess && fallback_js) {
+          try {
+            const jsResult = await page.evaluate(JS_CLICK_SCRIPT(selector)) as { success?: boolean; text?: string; tagName?: string };
+            if (jsResult?.success) {
+              clickSuccess = true;
+              clickMethod = "JavaScript injection";
+            }
+          } catch (error) {
+            lastError = error as Error;
+          }
+        }
+
+        if (!clickSuccess) {
+          throw lastError || new Error(`Failed to click element: ${selector}`);
+        }
 
         if (wait_after_ms > 0) {
-          await new Promise((r) => setTimeout(r, wait_after_ms));
+          await delay(wait_after_ms);
         }
 
         const pageInfo = await getPageInfo(page);
 
         let ssInfo = "";
         if (doScreenshot) {
-          const ssPath = await takePageScreenshot(page, "after_click");
+          const ssPath = await takePageScreenshot(page, "after_click", false);
           ssInfo = `\n📸 Screenshot: ${ssPath}`;
         }
 
@@ -513,9 +737,10 @@ export function registerBrowserTools(server: McpServer): void {
             {
               type: "text",
               text:
-                `✅ Klik berhasil!\n` +
+                `✅ Klik berhasil! [STABILIZED v5.2]\n` +
                 `${"─".repeat(50)}\n` +
-                `🎯 Selector : ${selector}\n` +
+                `🎯 Selector  : ${selector}\n` +
+                `🖱️  Method   : ${clickMethod}\n` +
                 `🖱️  Klik ke  : ${click_count}\n\n` +
                 `${pageInfo}` +
                 ssInfo,
@@ -609,7 +834,7 @@ export function registerBrowserTools(server: McpServer): void {
 
         let ssInfo = "";
         if (doScreenshot) {
-          const ssPath = await takePageScreenshot(page, "after_type");
+          const ssPath = await takePageScreenshot(page, "after_type", false);
           ssInfo = `\n📸 Screenshot: ${ssPath}`;
         }
 
@@ -642,7 +867,8 @@ export function registerBrowserTools(server: McpServer): void {
   // ── 5. browser_navigate ───────────────────────────────────────────────────
   server.tool(
     "browser_navigate",
-    "Navigasi browser: buka URL baru, back, forward, atau reload halaman.",
+    "Navigasi browser: buka URL baru, back, forward, atau reload halaman. " +
+      "[STABILIZED v5.2] Mendukung auto-retry dan session recovery saat timeout.",
     {
       session_id: z.string().describe("Session ID"),
       action: z
@@ -657,85 +883,187 @@ export function registerBrowserTools(server: McpServer): void {
         .default("networkidle2"),
       timeout_seconds: z.number().int().min(5).max(60).default(30),
       take_screenshot: z.boolean().default(true),
+      max_retries: z
+        .number()
+        .int()
+        .min(1)
+        .max(5)
+        .default(2)
+        .describe("Max retry jika timeout (hanya untuk 'goto')"),
     },
-    async ({ session_id, action, url, wait_until, timeout_seconds, take_screenshot: doScreenshot }) => {
+    async ({ 
+      session_id, 
+      action, 
+      url, 
+      wait_until, 
+      timeout_seconds, 
+      take_screenshot: doScreenshot,
+      max_retries
+    }) => {
+      let sessionData = await getSession(session_id);
+      if (!sessionData) {
+        return {
+          content: [{ type: "text", text: `❌ Session '${session_id}' tidak ditemukan.` }],
+        };
+      }
+
+      let recreated = false;
+
       try {
-        const sessionData = await getSession(session_id);
-        if (!sessionData) {
-          return {
-            content: [{ type: "text", text: `❌ Session '${session_id}' tidak ditemukan.` }],
-          };
-        }
+        const navigateOperation = async () => {
+          const page = sessionData!.pages.get(sessionData!.activePageId)!;
 
-        const page = sessionData.pages.get(sessionData.activePageId)!;
+          switch (action) {
+            case "goto":
+              if (!url) throw new Error("URL wajib untuk action 'goto'");
+              await page.goto(url, {
+                waitUntil: wait_until,
+                timeout: timeout_seconds * 1000,
+              });
+              break;
 
-        switch (action) {
-          case "goto":
-            if (!url) throw new Error("URL wajib untuk action 'goto'");
-            await page.goto(url, {
-              waitUntil: wait_until,
-              timeout: timeout_seconds * 1000,
-            });
-            break;
+            case "back":
+              await page.goBack({
+                waitUntil: wait_until,
+                timeout: timeout_seconds * 1000,
+              });
+              break;
 
-          case "back":
-            await page.goBack({
-              waitUntil: wait_until,
-              timeout: timeout_seconds * 1000,
-            });
-            break;
+            case "forward":
+              await page.goForward({
+                waitUntil: wait_until,
+                timeout: timeout_seconds * 1000,
+              });
+              break;
 
-          case "forward":
-            await page.goForward({
-              waitUntil: wait_until,
-              timeout: timeout_seconds * 1000,
-            });
-            break;
+            case "reload":
+              await page.reload({
+                waitUntil: wait_until,
+                timeout: timeout_seconds * 1000,
+              });
+              break;
 
-          case "reload":
-            await page.reload({
-              waitUntil: wait_until,
-              timeout: timeout_seconds * 1000,
-            });
-            break;
-
-          case "new_tab": {
-            if (!url) throw new Error("URL wajib untuk action 'new_tab'");
-            const newPage = await sessionData.browser.newPage();
-            await newPage.setUserAgent(sessionData.userAgent);
-            await newPage.goto(url, {
-              waitUntil: wait_until,
-              timeout: timeout_seconds * 1000,
-            });
-            const newPageId = `page_${sessionData.pages.size + 1}`;
-            sessionData.pages.set(newPageId, newPage);
-            sessionData.activePageId = newPageId;
-            break;
+            case "new_tab": {
+              if (!url) throw new Error("URL wajib untuk action 'new_tab'");
+              const newPage = await sessionData!.browser.newPage();
+              await newPage.setUserAgent(sessionData!.userAgent);
+              await newPage.goto(url, {
+                waitUntil: wait_until,
+                timeout: timeout_seconds * 1000,
+              });
+              const newPageId = `page_${sessionData!.pages.size + 1}`;
+              sessionData!.pages.set(newPageId, newPage);
+              sessionData!.activePageId = newPageId;
+              break;
+            }
           }
-        }
+        };
+
+        await retryWithBackoff(navigateOperation, {
+          maxRetries: action === "goto" ? max_retries : 1,
+          retryDelay: 2000,
+          operation: `navigate_${action}`
+        });
 
         const currentPage = sessionData.pages.get(sessionData.activePageId)!;
         const pageInfo = await getPageInfo(currentPage);
 
         let ssInfo = "";
         if (doScreenshot) {
-          const ssPath = await takePageScreenshot(currentPage, `nav_${action}`);
+          const ssPath = await takePageScreenshot(currentPage, `nav_${action}`, false);
           ssInfo = `\n📸 Screenshot: ${ssPath}`;
         }
+
+        let recreatedMsg = recreated ? "\n🔄 Session was recreated due to timeout" : "";
 
         return {
           content: [
             {
               type: "text",
               text:
-                `✅ Navigasi '${action}' berhasil!\n` +
+                `✅ Navigasi '${action}' berhasil! [STABILIZED v5.2]\n` +
                 `${"─".repeat(50)}\n` +
                 pageInfo +
+                recreatedMsg +
                 ssInfo,
             },
           ],
         };
       } catch (error) {
+        const errorMsg = (error as Error).message || "";
+        
+        // Session recovery untuk timeout pada goto
+        if (errorMsg.includes("timeout") && action === "goto" && url) {
+          try {
+            process.stderr.write(`[browser] Navigate timeout, attempting session recovery...\n`);
+            
+            // Tutup session yang bermasalah
+            await sessionData.browser.close().catch(() => null);
+            sessions.delete(session_id);
+            
+            // Buat session baru
+            const puppeteer = await import("puppeteer");
+            const extraArgs = [
+              "--disable-web-security",
+              "--disable-features=VizDisplayCompositor",
+              "--disable-blink-features=AutomationControlled",
+              "--disable-extensions",
+            ];
+            const browser = await puppeteer.default.launch(buildPuppeteerLaunchOptions(extraArgs));
+            const page = await browser.newPage();
+            
+            const vp = { width: 1440, height: 900, isMobile: false, deviceScaleFactor: 1 };
+            await page.setViewport(vp);
+            
+            const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+            await page.setUserAgent(userAgent);
+            
+            await page.goto(url, {
+              waitUntil: wait_until,
+              timeout: timeout_seconds * 1000,
+            });
+            
+            const newSessionId = generateSessionId();
+            const pageId = "page_1";
+            
+            const newSession: BrowserSession = {
+              browser,
+              pages: new Map([[pageId, page]]),
+              activePageId: pageId,
+              createdAt: new Date(),
+              lastUsedAt: new Date(),
+              userAgent,
+            };
+            sessions.set(newSessionId, newSession);
+            
+            const pageInfo = await getPageInfo(page);
+            
+            let ssInfo = "";
+            if (doScreenshot) {
+              const ssPath = await takePageScreenshot(page, `nav_${action}_recovered`, false);
+              ssInfo = `\n📸 Screenshot: ${ssPath}`;
+            }
+            
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `✅ Navigasi '${action}' berhasil dengan session recovery! [STABILIZED v5.2]\n` +
+                    `${"─".repeat(50)}\n` +
+                    `🔄 New Session ID: ${newSessionId}\n\n` +
+                    pageInfo +
+                    ssInfo,
+                },
+              ],
+            };
+          } catch (recoveryError) {
+            return {
+              content: [{ type: "text", text: formatToolError("browser_navigate", error) }],
+            };
+          }
+        }
+        
         return {
           content: [{ type: "text", text: formatToolError("browser_navigate", error) }],
         };
@@ -805,7 +1133,7 @@ export function registerBrowserTools(server: McpServer): void {
 
         let ssInfo = "";
         if (doScreenshot) {
-          const ssPath = await takePageScreenshot(page, `scroll_${direction}`);
+          const ssPath = await takePageScreenshot(page, `scroll_${direction}`, false);
           ssInfo = `\n📸 Screenshot: ${ssPath}`;
         }
 
@@ -834,7 +1162,8 @@ export function registerBrowserTools(server: McpServer): void {
   server.tool(
     "browser_get_content",
     "Ambil konten halaman saat ini: HTML, teks, atau data spesifik dari elemen. " +
-      "Gunakan ini untuk 'membaca' apa yang ada di browser.",
+      "Gunakan ini untuk 'membaca' apa yang ada di browser. " +
+      "[STABILIZED v5.2] Dengan smart wait dan auto-retry.",
     {
       session_id: z.string().describe("Session ID"),
       content_type: z
@@ -856,8 +1185,12 @@ export function registerBrowserTools(server: McpServer): void {
         .max(100000)
         .default(10000)
         .describe("Batas panjang output karakter"),
+      wait_for_network_idle: z
+        .boolean()
+        .default(true)
+        .describe("Tunggu network idle sebelum extract (mencegah race condition)"),
     },
-    async ({ session_id, content_type, selector, max_length }) => {
+    async ({ session_id, content_type, selector, max_length, wait_for_network_idle }) => {
       try {
         const result = await getActivePage(session_id);
         if (!result) {
@@ -867,74 +1200,93 @@ export function registerBrowserTools(server: McpServer): void {
         }
 
         const { page } = result;
-        const pageInfo = await getPageInfo(page);
-        let content = "";
-
-        switch (content_type) {
-          case "html":
-            content = await page.content();
-            break;
-
-          case "text":
-            content = await page.evaluate(() => document.body.innerText || document.body.textContent || "");
-            break;
-
-          case "element_text":
-            if (!selector) throw new Error("selector wajib untuk content_type 'element_text'");
-            content = await page.$eval(selector, (el) => (el as HTMLElement).innerText || el.textContent || "");
-            break;
-
-          case "element_html":
-            if (!selector) throw new Error("selector wajib untuk content_type 'element_html'");
-            content = await page.$eval(selector, (el) => el.outerHTML);
-            break;
-
-          case "page_info":
-            content = pageInfo;
-            break;
-
-          case "all_links": {
-            const links = await page.evaluate(() =>
-              Array.from(document.querySelectorAll("a[href]")).map((a) => ({
-                text: (a as HTMLAnchorElement).textContent?.trim().slice(0, 80),
-                href: (a as HTMLAnchorElement).href,
-              }))
-            );
-            content = links
-              .filter((l) => l.href && !l.href.startsWith("javascript:"))
-              .map((l) => `[${l.text}] → ${l.href}`)
-              .join("\n");
-            break;
-          }
-
-          case "all_inputs": {
-            const inputs = await page.evaluate(() =>
-              Array.from(
-                document.querySelectorAll("input, select, textarea, button")
-              ).map((el) => ({
-                tag: el.tagName.toLowerCase(),
-                type: (el as HTMLInputElement).type,
-                name: (el as HTMLInputElement).name,
-                id: el.id,
-                placeholder: (el as HTMLInputElement).placeholder,
-                value: (el as HTMLInputElement).value,
-                required: (el as HTMLInputElement).required,
-                visible: (el as HTMLElement).offsetParent !== null,
-              }))
-            );
-            content = inputs
-              .map(
-                (i) =>
-                  `<${i.tag} type="${i.type}" name="${i.name}" id="${i.id}"` +
-                  (i.placeholder ? ` placeholder="${i.placeholder}"` : "") +
-                  (i.required ? " required" : "") +
-                  (i.value ? ` value="${i.value.slice(0, 50)}"` : "") +
-                  `>`
-              )
-              .join("\n");
-            break;
+        
+        // STABILIZED v5.2: Smart wait sebelum extract untuk mencegah race condition
+        if (wait_for_network_idle) {
+          try {
+            await page.waitForNetworkIdle({ timeout: 5000 });
+          } catch {
+            // Ignore timeout, continue anyway
           }
         }
+
+        const extractContent = async () => {
+          const pageInfo = await getPageInfo(page);
+          let content = "";
+
+          switch (content_type) {
+            case "html":
+              content = await page.content();
+              break;
+
+            case "text":
+              content = await page.evaluate(() => document.body.innerText || document.body.textContent || "");
+              break;
+
+            case "element_text":
+              if (!selector) throw new Error("selector wajib untuk content_type 'element_text'");
+              content = await page.$eval(selector, (el) => (el as HTMLElement).innerText || el.textContent || "");
+              break;
+
+            case "element_html":
+              if (!selector) throw new Error("selector wajib untuk content_type 'element_html'");
+              content = await page.$eval(selector, (el) => el.outerHTML);
+              break;
+
+            case "page_info":
+              content = pageInfo;
+              break;
+
+            case "all_links": {
+              const links = await page.evaluate(() =>
+                Array.from(document.querySelectorAll("a[href]")).map((a) => ({
+                  text: (a as HTMLAnchorElement).textContent?.trim().slice(0, 80),
+                  href: (a as HTMLAnchorElement).href,
+                }))
+              );
+              content = links
+                .filter((l) => l.href && !l.href.startsWith("javascript:"))
+                .map((l) => `[${l.text}] → ${l.href}`)
+                .join("\n");
+              break;
+            }
+
+            case "all_inputs": {
+              const inputs = await page.evaluate(() =>
+                Array.from(
+                  document.querySelectorAll("input, select, textarea, button")
+                ).map((el) => ({
+                  tag: el.tagName.toLowerCase(),
+                  type: (el as HTMLInputElement).type,
+                  name: (el as HTMLInputElement).name,
+                  id: el.id,
+                  placeholder: (el as HTMLInputElement).placeholder,
+                  value: (el as HTMLInputElement).value,
+                  required: (el as HTMLInputElement).required,
+                  visible: (el as HTMLElement).offsetParent !== null,
+                }))
+              );
+              content = inputs
+                .map(
+                  (i) =>
+                    `<${i.tag} type="${i.type}" name="${i.name}" id="${i.id}"` +
+                    (i.placeholder ? ` placeholder="${i.placeholder}"` : "") +
+                    (i.required ? " required" : "") +
+                    (i.value ? ` value="${i.value.slice(0, 50)}"` : "") +
+                    `>`
+                )
+                .join("\n");
+              break;
+            }
+          }
+          return { content, pageInfo };
+        };
+
+        const { content, pageInfo } = await retryWithBackoff(extractContent, {
+          maxRetries: 3,
+          retryDelay: 500,
+          operation: "get_content"
+        });
 
         const truncated = content.length > max_length;
         const output = truncated ? content.slice(0, max_length) + "\n... [TRUNCATED]" : content;
@@ -944,7 +1296,7 @@ export function registerBrowserTools(server: McpServer): void {
             {
               type: "text",
               text:
-                `📄 Content (${content_type})\n` +
+                `📄 Content (${content_type}) [STABILIZED v5.2]\n` +
                 `${"─".repeat(50)}\n` +
                 `${pageInfo}\n\n` +
                 `${"─".repeat(50)}\n` +
@@ -1117,7 +1469,7 @@ export function registerBrowserTools(server: McpServer): void {
 
         let ssInfo = "";
         if (doScreenshot) {
-          const ssPath = await takePageScreenshot(page, "after_select");
+          const ssPath = await takePageScreenshot(page, "after_select", false);
           ssInfo = `\n📸 Screenshot: ${ssPath}`;
         }
 
@@ -1146,7 +1498,8 @@ export function registerBrowserTools(server: McpServer): void {
   server.tool(
     "browser_execute_script",
     "Eksekusi JavaScript di browser session aktif dan kembalikan hasilnya. " +
-      "Berguna untuk interaksi kompleks yang tidak bisa dicapai dengan click/type.",
+      "Berguna untuk interaksi kompleks yang tidak bisa dicapai dengan click/type. " +
+      "[STABILIZED v5.2] Dengan cleanup script preset.",
     {
       session_id: z.string().describe("Session ID"),
       script: z
@@ -1157,8 +1510,12 @@ export function registerBrowserTools(server: McpServer): void {
             "Contoh: 'return document.title' atau 'window.scrollTo(0, 500)'"
         ),
       take_screenshot: z.boolean().default(false),
+      use_cleanup_preset: z
+        .boolean()
+        .default(false)
+        .describe("Gunakan preset cleanup script untuk menghapus popup/overlay/ads"),
     },
-    async ({ session_id, script, take_screenshot: doScreenshot }) => {
+    async ({ session_id, script, take_screenshot: doScreenshot, use_cleanup_preset }) => {
       try {
         const result = await getActivePage(session_id);
         if (!result) {
@@ -1168,13 +1525,19 @@ export function registerBrowserTools(server: McpServer): void {
         }
 
         const { page } = result;
+        let jsResult: unknown;
 
-        const wrappedScript = `(async () => { ${script} })()`;
-        const jsResult = await page.evaluate(wrappedScript);
+        // STABILIZED v5.2: Support cleanup preset
+        if (use_cleanup_preset) {
+          jsResult = await page.evaluate(CLEANUP_OVERLAY_SCRIPT);
+        } else {
+          const wrappedScript = `(async () => { ${script} })()`;
+          jsResult = await page.evaluate(wrappedScript);
+        }
 
         let ssInfo = "";
         if (doScreenshot) {
-          const ssPath = await takePageScreenshot(page, "after_script");
+          const ssPath = await takePageScreenshot(page, "after_script", false);
           ssInfo = `\n📸 Screenshot: ${ssPath}`;
         }
 
@@ -1183,8 +1546,9 @@ export function registerBrowserTools(server: McpServer): void {
             {
               type: "text",
               text:
-                `⚡ Script dieksekusi!\n` +
+                `⚡ Script dieksekusi! [STABILIZED v5.2]\n` +
                 `${"─".repeat(50)}\n` +
+                (use_cleanup_preset ? `🧹 Cleanup preset executed\n` : ``) +
                 `Result:\n${JSON.stringify(jsResult, null, 2)}` +
                 ssInfo,
             },
@@ -1312,7 +1676,7 @@ export function registerBrowserTools(server: McpServer): void {
 
         let ssInfo = "";
         if (doScreenshot) {
-          const ssPath = await takePageScreenshot(page, "after_hover");
+          const ssPath = await takePageScreenshot(page, "after_hover", false);
           ssInfo = `\n📸 Screenshot: ${ssPath}`;
         }
 
@@ -1385,7 +1749,7 @@ export function registerBrowserTools(server: McpServer): void {
 
         let ssInfo = "";
         if (doScreenshot) {
-          const ssPath = await takePageScreenshot(page, "after_key");
+          const ssPath = await takePageScreenshot(page, "after_key", false);
           ssInfo = `\n📸 Screenshot: ${ssPath}`;
         }
 

@@ -273,11 +273,19 @@ export function registerAuditTools(server: McpServer): void {
         const resolvedPath = path.resolve(finalPath);
         await ensureDir(path.dirname(resolvedPath));
 
-        await page.screenshot({
+        // Screenshot dengan timeout untuk menghindari hanging
+        const screenshotPromise = page.screenshot({
           path: resolvedPath as `${string}.png`,
           fullPage: full_page,
           type: "png",
+          encoding: "binary",
         });
+        
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error(`Screenshot timeout after ${timeout_seconds}s`)), timeout_seconds * 1000);
+        });
+        
+        await Promise.race([screenshotPromise, timeoutPromise]);
 
         const stat = await fs.stat(resolvedPath);
         const sizekb = (stat.size / 1024).toFixed(1);

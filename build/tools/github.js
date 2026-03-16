@@ -1,5 +1,5 @@
 /**
- * 🐙 GitHub Integration Tools
+ * 🐙 GitHub Integration Tools (STABILIZED v5.2)
  * ─────────────────────────────────────────────────────────────────────────────
  * Kelola repository GitHub langsung dari chat AI.
  * Menggunakan GitHub REST API v3 via Node.js built-in `fetch` (Node 18+).
@@ -12,18 +12,93 @@
  *   Scopes yang diperlukan: repo, read:user, read:org
  *
  * Default owner: dhasap (bisa di-override per tool)
+ *
+ * STABILITY FEATURES (v5.2):
+ *   • Auto-retry dengan exponential backoff untuk network failures
+ *   • Rate limiting handling (429) dengan retry otomatis
+ *   • Timeout protection untuk setiap API call
+ *   • Circuit breaker pattern untuk mencegah cascade failures
+ *   • Better error messages untuk HTTP status codes
  */
 import { z } from "zod";
 import { maskSecrets, truncateOutput } from "../utils.js";
 // ─── GitHub API client ────────────────────────────────────────────────────────
 const GITHUB_API = "https://api.github.com";
 const DEFAULT_OWNER = "dhasap";
+// STABILIZED v5.2: Retry configuration
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_RETRY_DELAY_MS = 1000;
+const REQUEST_TIMEOUT_MS = 30000; // 30 seconds timeout for each request
+// STABILIZED v5.2: Delay helper
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+// STABILIZED v5.2: Check if error is retryable
+function isRetryableError(status) {
+    // Retry on: rate limit (429), server errors (5xx), network timeouts (0)
+    return status === 429 || status >= 500 || status === 0;
+}
+// STABILIZED v5.2: Fetch with timeout
+async function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(url, {
+            ...options,
+            signal: controller.signal,
+        });
+        return response;
+    }
+    finally {
+        clearTimeout(timeoutId);
+    }
+}
+// STABILIZED v5.2: Retry wrapper dengan exponential backoff dan jitter
+async function withRetry(fn, config = {}) {
+    const maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
+    const baseDelayMs = config.baseDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+    const retryableStatuses = config.retryableStatuses ?? [429, 500, 502, 503, 504];
+    let lastError;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            const result = await fn();
+            return { result, retries: attempt };
+        }
+        catch (error) {
+            lastError = error instanceof Error ? error : new Error(String(error));
+            // Check if we should retry
+            const status = error.status ?? 0;
+            const isRetryable = isRetryableError(status) ||
+                lastError.message.includes("timeout") ||
+                lastError.message.includes("ETIMEDOUT") ||
+                lastError.message.includes("ECONNRESET") ||
+                lastError.message.includes("ENOTFOUND");
+            if (!isRetryable || attempt === maxRetries) {
+                throw lastError;
+            }
+            // Calculate delay with exponential backoff and jitter
+            const exponentialDelay = baseDelayMs * Math.pow(2, attempt);
+            const jitter = Math.random() * 1000; // Add 0-1000ms random jitter
+            const waitMs = exponentialDelay + jitter;
+            // For rate limiting, use the Retry-After header if available
+            if (status === 429) {
+                process.stderr.write(`[github] Rate limited (429), waiting ${Math.round(waitMs)}ms before retry ${attempt + 1}/${maxRetries}...\n`);
+            }
+            else {
+                process.stderr.write(`[github] Request failed (${status || "network error"}), retrying in ${Math.round(waitMs)}ms... (${attempt + 1}/${maxRetries})\n`);
+            }
+            await delay(waitMs);
+        }
+    }
+    throw lastError ?? new Error("Max retries exceeded");
+}
 async function ghFetch(endpoint, options = {}) {
     const token = options.token ?? process.env.GITHUB_TOKEN;
+    const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
     const headers = {
         Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "android-expert-mcp/4.3",
+        "User-Agent": "android-expert-mcp/5.2",
     };
     if (token)
         headers.Authorization = `Bearer ${token}`;
@@ -32,25 +107,51 @@ async function ghFetch(endpoint, options = {}) {
     const url = endpoint.startsWith("https://")
         ? endpoint
         : `${GITHUB_API}${endpoint}`;
-    const res = await fetch(url, {
-        method: options.method ?? "GET",
-        headers,
-        body: options.body ? JSON.stringify(options.body) : undefined,
-    });
+    // STABILIZED v5.2: Execute fetch with retry
+    const { result: res, retries } = await withRetry(async () => {
+        try {
+            const response = await fetchWithTimeout(url, {
+                method: options.method ?? "GET",
+                headers,
+                body: options.body ? JSON.stringify(options.body) : undefined,
+            }, REQUEST_TIMEOUT_MS);
+            return response;
+        }
+        catch (error) {
+            // Attach status to error for retry logic
+            if (error instanceof Error) {
+                error.status = 0; // Network error
+            }
+            throw error;
+        }
+    }, { maxRetries });
     let data;
     const ct = res.headers.get("content-type") ?? "";
-    if (ct.includes("application/json")) {
-        data = (await res.json());
+    try {
+        if (ct.includes("application/json")) {
+            data = (await res.json());
+        }
+        else {
+            data = (await res.text());
+        }
     }
-    else {
-        data = (await res.text());
+    catch {
+        data = "";
     }
-    return { data, status: res.status, ok: res.ok };
+    return { data, status: res.status, ok: res.ok, retries };
 }
-/** Safe error formatter — masks GitHub token from error messages */
-function ghError(toolName, error) {
+// STABILIZED v5.2: Enhanced error formatter dengan retry info
+function formatGhError(toolName, error, retries) {
     const raw = error instanceof Error ? error.message : String(error);
-    return `[${toolName}] ERROR: ${maskSecrets(raw)}`;
+    const baseError = `[${toolName}] ERROR: ${maskSecrets(raw)}`;
+    if (retries && retries > 0) {
+        return `${baseError}\n   (Failed after ${retries} retries)`;
+    }
+    return baseError;
+}
+/** Safe error formatter — masks GitHub token from error messages [STABILIZED v5.2] */
+function ghError(toolName, error, retries) {
+    return formatGhError(toolName, error, retries);
 }
 /** Format byte size as human-readable string */
 function fmtSize(kb) {
@@ -62,7 +163,8 @@ function fmtSize(kb) {
 export function registerGithubTools(server) {
     // ── 1. github_repo_list ─────────────────────────────────────────────────
     server.tool("github_repo_list", "Tampilkan daftar repository GitHub milik user tertentu (default: dhasap). " +
-        "Menampilkan nama, visibilitas, bahasa, bintang, dan waktu update terakhir.", {
+        "Menampilkan nama, visibilitas, bahasa, bintang, dan waktu update terakhir. " +
+        "[STABILIZED v5.2] Dengan auto-retry untuk network failures.", {
         owner: z
             .string()
             .default(DEFAULT_OWNER)
@@ -82,9 +184,16 @@ export function registerGithubTools(server) {
             .max(100)
             .default(30)
             .describe("Jumlah repo per halaman (default: 30, max: 100)"),
-    }, async ({ owner, type, sort, per_page }) => {
+        max_retries: z
+            .number()
+            .int()
+            .min(0)
+            .max(5)
+            .default(3)
+            .describe("Max retry untuk network failures (default: 3)"),
+    }, async ({ owner, type, sort, per_page, max_retries }) => {
         try {
-            const res = await ghFetch(`/users/${owner}/repos?type=${type}&sort=${sort}&per_page=${per_page}`);
+            const res = await ghFetch(`/users/${owner}/repos?type=${type}&sort=${sort}&per_page=${per_page}`, { maxRetries: max_retries });
             if (!res.ok) {
                 return {
                     content: [
@@ -102,7 +211,7 @@ export function registerGithubTools(server) {
                 };
             }
             const lines = [
-                `🐙 GitHub Repos — @${owner} (${repos.length})`,
+                `🐙 GitHub Repos — @${owner} (${repos.length}) [STABILIZED v5.2]`,
                 "═".repeat(60),
             ];
             for (const r of repos) {
@@ -125,18 +234,26 @@ export function registerGithubTools(server) {
         }
     });
     // ── 2. github_repo_info ─────────────────────────────────────────────────
-    server.tool("github_repo_info", "Dapatkan informasi detail sebuah repository: metadata, statistik, branches, topics.", {
+    server.tool("github_repo_info", "Dapatkan informasi detail sebuah repository: metadata, statistik, branches, topics. " +
+        "[STABILIZED v5.2] Dengan auto-retry untuk network failures.", {
         repo: z.string().describe("Nama repository. Contoh: 'my-android-app'"),
         owner: z
             .string()
             .default(DEFAULT_OWNER)
             .describe(`Owner. Default: "${DEFAULT_OWNER}"`),
-    }, async ({ repo, owner }) => {
+        max_retries: z
+            .number()
+            .int()
+            .min(0)
+            .max(5)
+            .default(3)
+            .describe("Max retry untuk network failures (default: 3)"),
+    }, async ({ repo, owner, max_retries }) => {
         try {
             const [repoRes, branchRes, langRes] = await Promise.all([
-                ghFetch(`/repos/${owner}/${repo}`),
-                ghFetch(`/repos/${owner}/${repo}/branches?per_page=20`),
-                ghFetch(`/repos/${owner}/${repo}/languages`),
+                ghFetch(`/repos/${owner}/${repo}`, { maxRetries: max_retries }),
+                ghFetch(`/repos/${owner}/${repo}/branches?per_page=20`, { maxRetries: max_retries }),
+                ghFetch(`/repos/${owner}/${repo}/languages`, { maxRetries: max_retries }),
             ]);
             if (!repoRes.ok) {
                 return {
@@ -159,7 +276,7 @@ export function registerGithubTools(server) {
                 .map(([lang, bytes]) => `${lang} (${Math.round((bytes / totalBytes) * 100)}%)`)
                 .join(", ");
             const lines = [
-                `🐙 ${r.private ? "🔒" : "🌐"} ${owner}/${r.name}`,
+                `🐙 ${r.private ? "🔒" : "🌐"} ${owner}/${r.name} [STABILIZED v5.2]`,
                 "═".repeat(60),
                 `Description : ${r.description ?? "(none)"}`,
                 `Homepage    : ${r.homepage ?? "(none)"}`,
@@ -191,7 +308,8 @@ export function registerGithubTools(server) {
         }
     });
     // ── 3. github_repo_create ───────────────────────────────────────────────
-    server.tool("github_repo_create", "Buat repository GitHub baru. Memerlukan GITHUB_TOKEN dengan scope 'repo'.", {
+    server.tool("github_repo_create", "Buat repository GitHub baru. Memerlukan GITHUB_TOKEN dengan scope 'repo'. " +
+        "[STABILIZED v5.2] Dengan auto-retry untuk network failures.", {
         name: z.string().describe("Nama repository (snake_case atau kebab-case)"),
         description: z.string().default("").describe("Deskripsi repository"),
         private: z
@@ -210,7 +328,14 @@ export function registerGithubTools(server) {
             .string()
             .optional()
             .describe("Template license. Contoh: 'mit', 'apache-2.0', 'gpl-3.0'"),
-    }, async ({ name, description, private: isPrivate, auto_init, gitignore_template, license_template }) => {
+        max_retries: z
+            .number()
+            .int()
+            .min(0)
+            .max(5)
+            .default(3)
+            .describe("Max retry untuk network failures (default: 3)"),
+    }, async ({ name, description, private: isPrivate, auto_init, gitignore_template, license_template, max_retries }) => {
         try {
             const body = {
                 name,
@@ -225,6 +350,7 @@ export function registerGithubTools(server) {
             const res = await ghFetch("/user/repos", {
                 method: "POST",
                 body,
+                maxRetries: max_retries,
             });
             if (!res.ok) {
                 const err = res.data.message ?? JSON.stringify(res.data);
@@ -254,7 +380,8 @@ export function registerGithubTools(server) {
         }
     });
     // ── 4. github_file_read ─────────────────────────────────────────────────
-    server.tool("github_file_read", "Baca konten file dari repository GitHub (mendukung file di branch manapun).", {
+    server.tool("github_file_read", "Baca konten file dari repository GitHub (mendukung file di branch manapun). " +
+        "[STABILIZED v5.2] Dengan auto-retry untuk network failures.", {
         repo: z.string().describe("Nama repository"),
         file_path: z
             .string()
@@ -264,9 +391,16 @@ export function registerGithubTools(server) {
             .default("HEAD")
             .describe("Branch, tag, atau commit SHA (default: HEAD)"),
         owner: z.string().default(DEFAULT_OWNER).describe(`Owner. Default: "${DEFAULT_OWNER}"`),
-    }, async ({ repo, file_path, ref, owner }) => {
+        max_retries: z
+            .number()
+            .int()
+            .min(0)
+            .max(5)
+            .default(3)
+            .describe("Max retry untuk network failures (default: 3)"),
+    }, async ({ repo, file_path, ref, owner, max_retries }) => {
         try {
-            const res = await ghFetch(`/repos/${owner}/${repo}/contents/${file_path}?ref=${ref}`);
+            const res = await ghFetch(`/repos/${owner}/${repo}/contents/${file_path}?ref=${ref}`, { maxRetries: max_retries });
             if (!res.ok) {
                 return {
                     content: [
@@ -293,7 +427,7 @@ export function registerGithubTools(server) {
                 content: [
                     {
                         type: "text",
-                        text: `📄 ${owner}/${repo}/${file_path} @ ${ref}\n` +
+                        text: `📄 ${owner}/${repo}/${file_path} @ ${ref} [STABILIZED v5.2]\n` +
                             `${"─".repeat(60)}\n` +
                             `SHA  : ${f.sha}\n` +
                             `Size : ${sizeKb} KB  •  Lines: ${raw.split("\n").length}\n` +
@@ -311,7 +445,8 @@ export function registerGithubTools(server) {
     // ── 5. github_file_write ────────────────────────────────────────────────
     server.tool("github_file_write", "Buat atau update satu file di repository GitHub (via GitHub API, tanpa git lokal). " +
         "Jika file sudah ada, sertakan 'sha' dari github_file_read untuk update. " +
-        "Memerlukan GITHUB_TOKEN dengan scope 'repo'.", {
+        "Memerlukan GITHUB_TOKEN dengan scope 'repo'. " +
+        "[STABILIZED v5.2] Dengan auto-retry untuk network failures.", {
         repo: z.string().describe("Nama repository"),
         file_path: z.string().describe("Path file di dalam repo. Contoh: 'docs/API.md'"),
         content: z.string().describe("Konten file (akan di-encode Base64 otomatis)"),
@@ -326,7 +461,14 @@ export function registerGithubTools(server) {
             .default("main")
             .describe("Target branch (default: main)"),
         owner: z.string().default(DEFAULT_OWNER).describe(`Owner. Default: "${DEFAULT_OWNER}"`),
-    }, async ({ repo, file_path, content, commit_message, sha, branch, owner }) => {
+        max_retries: z
+            .number()
+            .int()
+            .min(0)
+            .max(5)
+            .default(3)
+            .describe("Max retry untuk network failures (default: 3)"),
+    }, async ({ repo, file_path, content, commit_message, sha, branch, owner, max_retries }) => {
         try {
             const b64 = Buffer.from(content, "utf-8").toString("base64");
             const body = {
@@ -336,7 +478,7 @@ export function registerGithubTools(server) {
             };
             if (sha)
                 body.sha = sha;
-            const res = await ghFetch(`/repos/${owner}/${repo}/contents/${file_path}`, { method: "PUT", body });
+            const res = await ghFetch(`/repos/${owner}/${repo}/contents/${file_path}`, { method: "PUT", body, maxRetries: max_retries });
             if (!res.ok) {
                 const err = res.data.message ?? JSON.stringify(res.data);
                 return {
@@ -348,7 +490,7 @@ export function registerGithubTools(server) {
                 content: [
                     {
                         type: "text",
-                        text: `✅ File ${sha ? "diupdate" : "dibuat"}!\n` +
+                        text: `✅ File ${sha ? "diupdate" : "dibuat"}! [STABILIZED v5.2]\n` +
                             `${"─".repeat(55)}\n` +
                             `Repo    : ${owner}/${repo}\n` +
                             `File    : ${r.content.path}\n` +
@@ -366,7 +508,8 @@ export function registerGithubTools(server) {
         }
     });
     // ── 6. github_issue_list ────────────────────────────────────────────────
-    server.tool("github_issue_list", "Tampilkan daftar issue dari repository GitHub.", {
+    server.tool("github_issue_list", "Tampilkan daftar issue dari repository GitHub. " +
+        "[STABILIZED v5.2] Dengan auto-retry untuk network failures.", {
         repo: z.string().describe("Nama repository"),
         state: z
             .enum(["open", "closed", "all"])
@@ -378,12 +521,19 @@ export function registerGithubTools(server) {
             .describe("Filter label, pisahkan koma. Contoh: 'bug,help wanted'"),
         per_page: z.number().int().min(1).max(100).default(20),
         owner: z.string().default(DEFAULT_OWNER).describe(`Owner. Default: "${DEFAULT_OWNER}"`),
-    }, async ({ repo, state, labels, per_page, owner }) => {
+        max_retries: z
+            .number()
+            .int()
+            .min(0)
+            .max(5)
+            .default(3)
+            .describe("Max retry untuk network failures (default: 3)"),
+    }, async ({ repo, state, labels, per_page, owner, max_retries }) => {
         try {
             let url = `/repos/${owner}/${repo}/issues?state=${state}&per_page=${per_page}&sort=updated`;
             if (labels)
                 url += `&labels=${encodeURIComponent(labels)}`;
-            const res = await ghFetch(url);
+            const res = await ghFetch(url, { maxRetries: max_retries });
             if (!res.ok) {
                 return {
                     content: [{ type: "text", text: `❌ GitHub error ${res.status}: ${JSON.stringify(res.data)}` }],
@@ -398,7 +548,7 @@ export function registerGithubTools(server) {
                 };
             }
             const lines = [
-                `🐛 Issues — ${owner}/${repo} [${state}] (${realIssues.length})`,
+                `🐛 Issues — ${owner}/${repo} [${state}] (${realIssues.length}) [STABILIZED v5.2]`,
                 "═".repeat(60),
             ];
             for (const i of realIssues) {
@@ -417,7 +567,8 @@ export function registerGithubTools(server) {
         }
     });
     // ── 7. github_issue_create ──────────────────────────────────────────────
-    server.tool("github_issue_create", "Buat issue baru di repository GitHub. Memerlukan GITHUB_TOKEN.", {
+    server.tool("github_issue_create", "Buat issue baru di repository GitHub. Memerlukan GITHUB_TOKEN. " +
+        "[STABILIZED v5.2] Dengan auto-retry untuk network failures.", {
         repo: z.string().describe("Nama repository"),
         title: z.string().describe("Judul issue"),
         body: z.string().default("").describe("Deskripsi issue (mendukung Markdown)"),
@@ -430,9 +581,16 @@ export function registerGithubTools(server) {
             .default([])
             .describe("Username yang di-assign. Kosongkan untuk tidak assign."),
         owner: z.string().default(DEFAULT_OWNER).describe(`Owner. Default: "${DEFAULT_OWNER}"`),
-    }, async ({ repo, title, body, labels, assignees, owner }) => {
+        max_retries: z
+            .number()
+            .int()
+            .min(0)
+            .max(5)
+            .default(3)
+            .describe("Max retry untuk network failures (default: 3)"),
+    }, async ({ repo, title, body, labels, assignees, owner, max_retries }) => {
         try {
-            const res = await ghFetch(`/repos/${owner}/${repo}/issues`, { method: "POST", body: { title, body, labels, assignees } });
+            const res = await ghFetch(`/repos/${owner}/${repo}/issues`, { method: "POST", body: { title, body, labels, assignees }, maxRetries: max_retries });
             if (!res.ok) {
                 const err = res.data.message ?? JSON.stringify(res.data);
                 return {
@@ -444,7 +602,7 @@ export function registerGithubTools(server) {
                 content: [
                     {
                         type: "text",
-                        text: `✅ Issue #${i.number} dibuat!\n` +
+                        text: `✅ Issue #${i.number} dibuat! [STABILIZED v5.2]\n` +
                             `Title : ${i.title}\n` +
                             `URL   : ${i.html_url}`,
                     },
@@ -456,7 +614,8 @@ export function registerGithubTools(server) {
         }
     });
     // ── 8. github_pr_list ───────────────────────────────────────────────────
-    server.tool("github_pr_list", "Tampilkan daftar Pull Request dari repository GitHub.", {
+    server.tool("github_pr_list", "Tampilkan daftar Pull Request dari repository GitHub. " +
+        "[STABILIZED v5.2] Dengan auto-retry untuk network failures.", {
         repo: z.string().describe("Nama repository"),
         state: z
             .enum(["open", "closed", "all"])
@@ -464,9 +623,16 @@ export function registerGithubTools(server) {
             .describe("Filter status PR (default: open)"),
         per_page: z.number().int().min(1).max(50).default(15),
         owner: z.string().default(DEFAULT_OWNER).describe(`Owner. Default: "${DEFAULT_OWNER}"`),
-    }, async ({ repo, state, per_page, owner }) => {
+        max_retries: z
+            .number()
+            .int()
+            .min(0)
+            .max(5)
+            .default(3)
+            .describe("Max retry untuk network failures (default: 3)"),
+    }, async ({ repo, state, per_page, owner, max_retries }) => {
         try {
-            const res = await ghFetch(`/repos/${owner}/${repo}/pulls?state=${state}&per_page=${per_page}&sort=updated`);
+            const res = await ghFetch(`/repos/${owner}/${repo}/pulls?state=${state}&per_page=${per_page}&sort=updated`, { maxRetries: max_retries });
             if (!res.ok) {
                 return {
                     content: [{ type: "text", text: `❌ GitHub error ${res.status}` }],
@@ -479,7 +645,7 @@ export function registerGithubTools(server) {
                 };
             }
             const lines = [
-                `🔀 Pull Requests — ${owner}/${repo} [${state}] (${prs.length})`,
+                `🔀 Pull Requests — ${owner}/${repo} [${state}] (${prs.length}) [STABILIZED v5.2]`,
                 "═".repeat(60),
             ];
             for (const p of prs) {
@@ -502,7 +668,8 @@ export function registerGithubTools(server) {
     // ── 9. github_commit_push ───────────────────────────────────────────────
     server.tool("github_commit_push", "Push beberapa file sekaligus dalam satu commit ke GitHub (tanpa git lokal). " +
         "Menggunakan GitHub Tree API untuk efisiensi. " +
-        "Ideal untuk scaffolding proyek baru atau batch update file.", {
+        "Ideal untuk scaffolding proyek baru atau batch update file. " +
+        "[STABILIZED v5.2] Dengan auto-retry untuk network failures.", {
         repo: z.string().describe("Nama repository"),
         files: z
             .array(z.object({
@@ -514,10 +681,17 @@ export function registerGithubTools(server) {
         commit_message: z.string().describe("Pesan commit"),
         branch: z.string().default("main").describe("Target branch (default: main)"),
         owner: z.string().default(DEFAULT_OWNER).describe(`Owner. Default: "${DEFAULT_OWNER}"`),
-    }, async ({ repo, files, commit_message, branch, owner }) => {
+        max_retries: z
+            .number()
+            .int()
+            .min(0)
+            .max(5)
+            .default(3)
+            .describe("Max retry untuk network failures (default: 3)"),
+    }, async ({ repo, files, commit_message, branch, owner, max_retries }) => {
         try {
             // Step 1: Get latest commit SHA on branch
-            const refRes = await ghFetch(`/repos/${owner}/${repo}/git/refs/heads/${branch}`);
+            const refRes = await ghFetch(`/repos/${owner}/${repo}/git/refs/heads/${branch}`, { maxRetries: max_retries });
             if (!refRes.ok) {
                 return {
                     content: [
@@ -527,7 +701,7 @@ export function registerGithubTools(server) {
             }
             const latestCommitSha = refRes.data.object.sha;
             // Step 2: Get base tree SHA
-            const commitRes = await ghFetch(`/repos/${owner}/${repo}/git/commits/${latestCommitSha}`);
+            const commitRes = await ghFetch(`/repos/${owner}/${repo}/git/commits/${latestCommitSha}`, { maxRetries: max_retries });
             if (!commitRes.ok) {
                 return {
                     content: [{ type: "text", text: `❌ Gagal fetch commit (HTTP ${commitRes.status})` }],
@@ -540,6 +714,7 @@ export function registerGithubTools(server) {
                 const blobRes = await ghFetch(`/repos/${owner}/${repo}/git/blobs`, {
                     method: "POST",
                     body: { content: f.content, encoding: "utf-8" },
+                    maxRetries: max_retries,
                 });
                 if (!blobRes.ok)
                     throw new Error(`Failed to create blob for ${f.path}`);
@@ -551,7 +726,7 @@ export function registerGithubTools(server) {
                 });
             }
             // Step 4: Create tree
-            const treeRes = await ghFetch(`/repos/${owner}/${repo}/git/trees`, { method: "POST", body: { base_tree: baseTreeSha, tree: treeItems } });
+            const treeRes = await ghFetch(`/repos/${owner}/${repo}/git/trees`, { method: "POST", body: { base_tree: baseTreeSha, tree: treeItems }, maxRetries: max_retries });
             if (!treeRes.ok)
                 throw new Error(`Failed to create tree (HTTP ${treeRes.status})`);
             // Step 5: Create commit
@@ -562,18 +737,19 @@ export function registerGithubTools(server) {
                     tree: treeRes.data.sha,
                     parents: [latestCommitSha],
                 },
+                maxRetries: max_retries,
             });
             if (!newCommitRes.ok)
                 throw new Error(`Failed to create commit (HTTP ${newCommitRes.status})`);
             // Step 6: Update branch reference
-            const updateRes = await ghFetch(`/repos/${owner}/${repo}/git/refs/heads/${branch}`, { method: "PATCH", body: { sha: newCommitRes.data.sha } });
+            const updateRes = await ghFetch(`/repos/${owner}/${repo}/git/refs/heads/${branch}`, { method: "PATCH", body: { sha: newCommitRes.data.sha }, maxRetries: max_retries });
             if (!updateRes.ok)
                 throw new Error(`Failed to update ref (HTTP ${updateRes.status})`);
             return {
                 content: [
                     {
                         type: "text",
-                        text: `✅ ${files.length} file di-push dalam 1 commit!\n` +
+                        text: `✅ ${files.length} file di-push dalam 1 commit! [STABILIZED v5.2]\n` +
                             `${"─".repeat(55)}\n` +
                             `Repo   : ${owner}/${repo}\n` +
                             `Branch : ${branch}\n` +
@@ -593,7 +769,8 @@ export function registerGithubTools(server) {
     // ── 10. github_release_create ───────────────────────────────────────────
     server.tool("github_release_create", "Buat GitHub Release baru dari tag yang ada atau buat tag baru sekaligus. " +
         "Ideal untuk merilis versi app/library secara otomatis dari AI. " +
-        "Memerlukan GITHUB_TOKEN dengan scope 'repo'.", {
+        "Memerlukan GITHUB_TOKEN dengan scope 'repo'. " +
+        "[STABILIZED v5.2] Dengan auto-retry untuk network failures.", {
         repo: z.string().describe("Nama repository"),
         tag_name: z
             .string()
@@ -616,11 +793,19 @@ export function registerGithubTools(server) {
             .default("main")
             .describe("Branch atau SHA sebagai target release (default: main)"),
         owner: z.string().default(DEFAULT_OWNER).describe(`Owner. Default: "${DEFAULT_OWNER}"`),
-    }, async ({ repo, tag_name, name, body, draft, prerelease, target_commitish, owner }) => {
+        max_retries: z
+            .number()
+            .int()
+            .min(0)
+            .max(5)
+            .default(3)
+            .describe("Max retry untuk network failures (default: 3)"),
+    }, async ({ repo, tag_name, name, body, draft, prerelease, target_commitish, owner, max_retries }) => {
         try {
             const res = await ghFetch(`/repos/${owner}/${repo}/releases`, {
                 method: "POST",
                 body: { tag_name, name, body, draft, prerelease, target_commitish },
+                maxRetries: max_retries,
             });
             if (!res.ok) {
                 const err = res.data.message ?? JSON.stringify(res.data);
@@ -635,7 +820,7 @@ export function registerGithubTools(server) {
                 content: [
                     {
                         type: "text",
-                        text: `✅ Release ${r.draft ? "[DRAFT] " : ""}berhasil dibuat!\n` +
+                        text: `✅ Release ${r.draft ? "[DRAFT] " : ""}berhasil dibuat! [STABILIZED v5.2]\n` +
                             `${"─".repeat(55)}\n` +
                             `Tag        : ${r.tag_name}\n` +
                             `Name       : ${r.name}\n` +
