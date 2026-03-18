@@ -1,6 +1,8 @@
 # 🔥 Panduan IDX Firebase Studio + Firebase Test Lab
 
 > Panduan khusus untuk vibe coding di **Firebase IDX Studio** — solusi saat physical device tidak bisa dikoneksikan langsung.
+> 
+> **📝 Last Updated:** 2026-03-17 | **Changelog:** Update workflow emulator IDX (tidak perlu buat AVD manual)
 
 ---
 
@@ -19,7 +21,7 @@ Firebase IDX Studio
 │           │               │           │         │
 │    ┌──────▼──────┐  ┌─────▼──────┐   │         │
 │    │Android Emu  │  │Firebase    │   │         │
-│    │(TCP:5554)   │  │Test Lab    │   │         │
+│    │(TCP:5555)   │  │Test Lab    │   │         │
 │    └─────────────┘  └────────────┘   │         │
 └─────────────────────────────────────────────────┘
 ```
@@ -28,89 +30,126 @@ Firebase IDX Studio
 
 ## 📱 OPSI 1: Emulator di IDX (Gratis, No Cloud)
 
-### Setup Emulator di IDX
+### ⚠️ PENTING: Aturan Dasar
 
-**Langkah 1** — Tambahkan Android tools ke `.idx/dev.nix`:
+| ❌ JANGAN LAKUKAN | ✅ LAKUKAN |
+|-------------------|------------|
+| `avdmanager create avd` | `adb devices` untuk cek status |
+| `sdkmanager "system-images..."` | `adb tcpip 5555` untuk enable TCP mode |
+| `emulator -avd ...` command | `adb connect localhost:5555` |
+| Download system image baru | Connect ke emulator yang sudah running |
 
-```nix
-{ pkgs, ... }: {
-  packages = [
-    pkgs.android-tools          # ADB + fastboot
-    pkgs.android-studio         # Opsional: GUI AVD Manager  
-    pkgs.jdk17                  # Java untuk Gradle
-  ];
+**💡 Di IDX Firebase Studio, emulator sudah dikelola oleh Flutter preview. Kita tinggal connect via ADB!**
 
-  # Environment variables
-  env = {
-    ANDROID_HOME = "${pkgs.android-sdk}";
-    ANDROID_SDK_ROOT = "${pkgs.android-sdk}";
-  };
-}
-```
+---
 
-**Langkah 2** — Buat AVD (Android Virtual Device) via terminal IDX:
+### Setup Emulator di IDX (Step-by-Step)
+
+**Langkah 1** — Verifikasi Emulator Running
 
 ```bash
-# Lihat sistem images yang tersedia
-sdkmanager --list | grep "system-images"
-
-# Download system image
-sdkmanager "system-images;android-33;google_apis;x86_64"
-
-# Buat AVD
-avdmanager create avd \
-  --name "Pixel6_API33" \
-  --package "system-images;android-33;google_apis;x86_64" \
-  --device "pixel_6"
-
-# Lihat AVD yang tersedia
-emulator -list-avds
+adb devices -l
 ```
 
-**Langkah 3** — Jalankan emulator (headless, tanpa GUI):
+**Output yang diharapkan:**
+```
+List of devices attached
+emulator-5554          device product:sdk_gphone64_x86_64 model:sdk_gphone64_x86_64
+```
+
+**Jika status `unauthorized`:**
+> Buka tab **Flutter Preview** di sidebar IDX → Klik **"Allow"** pada dialog "Allow USB debugging?"
+
+**Jika `no devices`:**
+> Beritahu AI agent — jangan coba start emulator manual (sudah dikelola IDX)
+
+---
+
+**Langkah 2** — Enable TCP/IP Mode
 
 ```bash
-# Di terminal IDX (background)
-emulator -avd Pixel6_API33 \
-  -no-window \
-  -no-audio \
-  -no-snapshot \
-  -gpu swiftshader_indirect \
-  &
+# Restart ADB server (jika diperlukan)
+adb kill-server && adb start-server
 
-# Tunggu boot (sekitar 60-120 detik)
-adb wait-for-device
-adb shell getprop sys.boot_completed  # Harus "1"
+# Enable TCP mode di emulator
+adb -s emulator-5554 tcpip 5555
+
+# Connect via TCP
+adb connect localhost:5555
 ```
 
-**Langkah 4** — Connect via MCP tool:
+**Verifikasi:**
+```bash
+adb devices -l
+```
+
+Output harus menunjukkan 2 koneksi:
+```
+emulator-5554          device product:sdk_gphone64_x86_64...
+localhost:5555         device product:sdk_gphone64_x86_64...
+```
+
+---
+
+**Langkah 3** — Connect via MCP Tool
 
 ```
-Minta AI Agent: "Deteksi emulator di IDX environment"
-→ AI akan memanggil: idx_detect_emulator(auto_connect=true)
+Minta AI: "Deteksi dan connect ke emulator di IDX"
+→ AI akan memanggil: idx_connect_emulator(host="localhost", port=5555)
 ```
+
+**Verifikasi berhasil:**
+```
+✅ Terhubung ke localhost:5555
+✅ Emulator siap! (boot dalam Xs)
+📱 Model   : sdk_gphone64_x86_64
+📱 Android : 16 (API 36)
+📱 Serial  : localhost:5555
+```
+
+---
+
+### Info Emulator Default IDX
+
+| Property | Value |
+|----------|-------|
+| Device | sdk_gphone64 x86_64 |
+| Android | API 36 (Android 16) |
+| ADB Local | emulator-5554 |
+| ADB TCP | localhost:5555 |
+| Resolution | 1080x1920 |
+| DPI | 440 |
+| Mode | Headless (tanpa GUI window) |
 
 ---
 
 ### Cara Pakai MCP Tools di IDX
 
-Setelah emulator running, AI bisa:
+Setelah emulator running dan TCP mode aktif:
 
 ```
-"Install APK saya ke emulator"
-→ idx_install_apk(apk_path="./app/build/outputs/apk/debug/app-debug.apk")
+"Install APK ke emulator"
+→ idx_install_apk(
+    apk_path="./app/build/outputs/apk/debug/app-debug.apk",
+    device_serial="localhost:5555"
+  )
 
-"Screenshot layar emulator sekarang"
-→ emulator_screenshot()
+"Screenshot layar emulator"
+→ adb -s localhost:5555 shell screencap -p /sdcard/screen.png
+→ adb -s localhost:5555 pull /sdcard/screen.png ./screen.png
 
-"Tap tombol Login di emulator"
-→ emulator_ui_dump() → lihat resource_id → emulator_tap(action="tap_by_id", resource_id="com.app:id/btn_login")
+"Dump UI hierarchy"
+→ adb -s localhost:5555 shell uiautomator dump /sdcard/ui.xml
+→ adb -s localhost:5555 shell cat /sdcard/ui.xml
 
-"Ketik email di form login"
-→ emulator_input_text(resource_id="com.app:id/et_email", text="test@example.com")
+"Tap tombol dengan resource ID"
+→ adb -s localhost:5555 shell input tap X Y
 
-"Rekam video 15 detik alur onboarding"
-→ emulator_record_screen(duration_seconds=15)
+"Ketik teks"
+→ adb -s localhost:5555 shell input text "Hello World"
+
+"Rekam video"
+→ emulator_record_screen(device_serial="localhost:5555", duration_seconds=15)
 ```
 
 ---
@@ -119,11 +158,13 @@ Setelah emulator running, AI bisa:
 
 | Problem | Solusi |
 |---------|--------|
-| `adb: command not found` | `sudo apt install android-tools-adb` atau tambahkan ke dev.nix |
-| `emulator: command not found` | Gunakan path lengkap: `$ANDROID_HOME/emulator/emulator` |
-| Port 5554 tidak bisa diakses | Cek IDX port forwarding settings |
-| Emulator lambat | Tambahkan flag `-gpu swiftshader_indirect -no-snapshot` |
-| `uiautomator dump` gagal | Pastikan layar tidak terkunci: `adb shell input keyevent KEYCODE_WAKEUP` |
+| `unauthorized` | **Buka tab Flutter Preview → Klik "Allow" pada dialog USB debugging** |
+| `failed to authenticate to localhost:5555` | Belum klik "Allow USB debugging" di Flutter Preview |
+| `offline` | Tunggu 30s (booting), lalu coba lagi |
+| `no devices/emulator` | Emulator belum di-enable TCP mode. Jalankan `adb tcpip 5555` dulu |
+| `emulator: command not found` | **Normal di IDX** — jangan coba start emulator manual |
+| `uiautomator dump` gagal | Layar mungkin terkunci: `adb shell input keyevent 82` (unlock) |
+| Screenshot hitam/emulator tidak merespons | Wake up: `adb shell input keyevent KEYCODE_WAKEUP` |
 
 ---
 
@@ -133,8 +174,7 @@ Setelah emulator running, AI bisa:
 
 ```bash
 # 1. Install gcloud CLI di IDX
-curl https://sdk.cloud.google.com | bash
-exec -l $SHELL
+apt-get update && apt-get install -y google-cloud-sdk
 
 # 2. Login dan setup project
 gcloud auth login
@@ -159,7 +199,8 @@ gsutil mb -p YOUR_PROJECT_ID gs://YOUR_PROJECT_ID-test-results
     apk_path="./app/build/outputs/apk/debug/app-debug.apk",
     test_type="robo",
     device_model="Pixel6",
-    android_version="33"
+    android_version="33",
+    timeout_minutes=10
   )
 ```
 
@@ -180,18 +221,20 @@ gsutil mb -p YOUR_PROJECT_ID gs://YOUR_PROJECT_ID-test-results
 **Download & Analisa Hasil:**
 
 ```
-"Download dan analisa hasil test dari Test Lab"
+"Download hasil test dari Test Lab"
 → ftl_download_results(
     gcs_path="gs://my-bucket/results/matrix-xyz",
     download_types=["screenshots", "logcat", "report_xml"]
   )
+
+"Parse report test"
 → ftl_parse_report(report_path="./ftl_results/report_xml/test_result_1.xml")
 ```
 
-### Lihat Device yang Tersedia:
+### Lihat Device yang Tersedia
 
 ```
-"Tampilkan device Pixel yang tersedia di Firebase Test Lab"
+"Tampilkan device Pixel yang tersedia"
 → ftl_list_devices(project_id="my-firebase-project", filter_model="Pixel")
 ```
 
@@ -201,29 +244,35 @@ gsutil mb -p YOUR_PROJECT_ID gs://YOUR_PROJECT_ID-test-results
 
 | | Emulator IDX | Firebase Test Lab |
 |---|---|---|
-| **Biaya** | Gratis (termasuk IDX quota) | ~$1/device-hour (Spark: gratis 5/hari) |
-| **Setup** | 10-15 menit | 5 menit (jika gcloud sudah login) |
-| **Device variety** | Satu AVD | 100+ device model |
-| **Screenshot** | Real-time via ADB | Setelah test selesai |
-| **Internet** | Tidak perlu | Perlu |
-| **Test scale** | 1 device | Paralel banyak device |
+| **Biaya** | Gratis (termasuk IDX quota) | ~$1/device-hour (Spark: 5 test/hari gratis) |
+| **Setup** | 2 menit (TCP mode) | 5 menit (jika gcloud sudah login) |
+| **Device variety** | 1 AVD (Android 16) | 100+ device model |
+| **Real-time** | ✅ Screenshot/UI dump real-time | ⏱️ Setelah test selesai |
+| **Internet** | Tidak perlu | Diperlukan |
+| **Parallel test** | 1 device | Banyak device parallel |
 
 ---
 
 ## 🚀 Alur Kerja Rekomendasi untuk Vibe Coding
 
+### 1. DEVELOPMENT (iterasi cepat)
 ```
-1. DEVELOPMENT (iterasi cepat)
-   Build → idx_install_apk → emulator_screenshot → emulator_ui_dump
-   
-2. DEBUGGING UI
-   emulator_ui_dump → emulator_tap/emulator_input_text → emulator_screenshot
-   
-3. PRE-RELEASE TESTING (quality gate)
-   Build Release APK → ftl_run_test (multiple devices) → ftl_parse_report
-   
-4. CI/CD (GitHub Actions)
-   gradle assembleRelease → ftl_run_test → notify hasil
+Build APK → idx_install_apk → Screenshot → UI Dump → Fix → Repeat
+```
+
+### 2. DEBUGGING UI
+```
+emulator_ui_dump → Tap/Input → Screenshot → Verifikasi
+```
+
+### 3. PRE-RELEASE TESTING (quality gate)
+```
+Build Release APK → ftl_run_test (multiple devices) → Parse Report
+```
+
+### 4. CI/CD (GitHub Actions)
+```
+gradle assembleRelease → ftl_run_test → Notifikasi hasil ke Discord/Slack
 ```
 
 ---
@@ -231,24 +280,65 @@ gsutil mb -p YOUR_PROJECT_ID gs://YOUR_PROJECT_ID-test-results
 ## ⚡ Quick Commands Cheatsheet
 
 ```bash
-# Cek emulator running
-adb devices
+# ═══════════════════════════════════════════════════
+# INFO DEVICE
+# ═══════════════════════════════════════════════════
+adb -s localhost:5555 shell getprop ro.product.model
+adb -s localhost:5555 shell getprop ro.build.version.release
+adb -s localhost:5555 shell getprop ro.build.version.sdk
 
-# Wake up layar emulator
-adb shell input keyevent KEYCODE_WAKEUP
+# ═══════════════════════════════════════════════════
+# LAYAR & INTERAKSI
+# ═══════════════════════════════════════════════════
+adb -s localhost:5555 shell input keyevent KEYCODE_WAKEUP  # Wake up
+adb -s localhost:5555 shell input keyevent 82               # Unlock
+adb -s localhost:5555 shell input tap X Y                   # Tap koordinat
+adb -s localhost:5555 shell input swipe X1 Y1 X2 Y2         # Swipe
+adb -s localhost:5555 shell input text "Hello"              # Input teks
+adb -s localhost:5555 shell input keyevent 4                # Back button
+adb -s localhost:5555 shell input keyevent 3                # Home button
 
-# Unlock layar
-adb shell input keyevent 82
+# ═══════════════════════════════════════════════════
+# SCREENSHOT & SCREEN RECORD
+# ═══════════════════════════════════════════════════
+adb -s localhost:5555 shell screencap -p /sdcard/screen.png
+adb -s localhost:5555 pull /sdcard/screen.png ./screen.png
+adb -s localhost:5555 shell screenrecord /sdcard/video.mp4  # Stop: Ctrl+C
 
-# Force stop app
-adb shell am force-stop com.your.package
+# ═══════════════════════════════════════════════════
+# UI DUMP (SCRAPING)
+# ═══════════════════════════════════════════════════
+adb -s localhost:5555 shell uiautomator dump /sdcard/ui.xml
+adb -s localhost:5555 shell cat /sdcard/ui.xml
 
-# Clear app data
-adb shell pm clear com.your.package
+# ═══════════════════════════════════════════════════
+# APP MANAGEMENT
+# ═══════════════════════════════════════════════════
+adb -s localhost:5555 install app-debug.apk
+adb -s localhost:5555 install -r app-debug.apk              # Replace
+adb -s localhost:5555 uninstall com.package.name
+adb -s localhost:5555 shell am force-stop com.package.name
+adb -s localhost:5555 shell pm clear com.package.name       # Clear data
+adb -s localhost:5555 shell pm list packages                # List apps
 
-# Lihat top activity
-adb shell dumpsys activity | grep "mResumedActivity"
-
-# Simulate network conditions
-adb shell settings put global network_preference 1  # WiFi only
+# ═══════════════════════════════════════════════════
+# ACTIVITY & LOG
+# ═══════════════════════════════════════════════════
+adb -s localhost:5555 shell dumpsys activity | grep "mResumedActivity"
+adb -s localhost:5555 logcat -d | grep "AndroidRuntime"     # Crash log
+adb -s localhost:5555 logcat -c                             # Clear log
 ```
+
+---
+
+## 📚 Referensi
+
+- [Dokumentasi ADB](https://developer.android.com/studio/command-line/adb)
+- [Firebase Test Lab](https://firebase.google.com/docs/test-lab)
+- [IDX Documentation](https://firebase.google.com/docs/studio)
+- Panduan Lanjutan: `idx-emulator-connect.md`
+
+---
+
+*Last updated: 2026-03-17*
+*Changelog: Simplify workflow — tidak perlu buat AVD manual, emulator sudah tersedia di IDX Flutter workspace*
