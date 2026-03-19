@@ -393,9 +393,9 @@ async function getConnectedDevicesList(): Promise<
   return r.stdout
     .split("\n")
     .slice(1)
-    .filter((l) => l.includes("\t") && !l.startsWith("*"))
+    .filter((l) => l.trim().length > 0 && !l.startsWith("*"))
     .map((l) => {
-      const parts = l.split(/\s+/);
+      const parts = l.trim().split(/\s+/);
       const serial = parts[0] ?? "";
       const state = parts[1] ?? "unknown";
       return {
@@ -404,7 +404,7 @@ async function getConnectedDevicesList(): Promise<
         isEmulator: serial.startsWith("emulator-") || serial.includes(":5"),
       };
     })
-    .filter((d) => d.serial);
+    .filter((d) => d.serial && (d.state === "device" || d.state === "emulator"));
 }
 
 async function waitForTestLabOperation(
@@ -567,9 +567,14 @@ export function registerIdxFirebaseTools(server: McpServer): void {
             if (success) {
               lines.push(`   ✅ Terhubung: ${f.address}`);
             } else {
-              lines.push(
-                `   ❌ Gagal: ${f.address} — ${connectResult.stdout.trim()}`
-              );
+              // Jika gagal autentikasi tapi ada existing connection, skip
+              if (connectResult.stderr.includes("failed to authenticate") && existingEmulators.length > 0) {
+                lines.push(`   ⚠️  Auth gagal, menggunakan koneksi existing`);
+              } else {
+                lines.push(
+                  `   ❌ Gagal: ${f.address} — ${connectResult.stdout.trim()}`
+                );
+              }
             }
           }
         }
@@ -580,6 +585,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         const finalDevices = await getConnectedDevicesList();
         if (finalDevices.length === 0) {
           lines.push("   (tidak ada device terkoneksi)");
+          lines.push("   💡 Coba jalankan: adb devices -l");
         } else {
           finalDevices.forEach((d) => {
             const icon = d.isEmulator ? "🤖" : "📱";
@@ -643,10 +649,61 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           "─".repeat(55),
         ];
 
+        // Cek apakah emulator sudah terkoneksi via USB/local socket (emulator-XXXX)
+        const existingDevices = await getConnectedDevicesList();
+        const existingEmulator = existingDevices.find(d => d.isEmulator && d.state === "device");
+        
+        if (existingEmulator) {
+          lines.push(`✅ Emulator sudah terkoneksi: ${existingEmulator.serial}`);
+          lines.push("🔄 Mengaktifkan TCP/IP mode...");
+          
+          // Enable TCP mode via emulator yang sudah terkoneksi
+          const tcpResult = await runAdbCommand(
+            `adb -s ${existingEmulator.serial} tcpip ${port}`,
+            undefined,
+            10000
+          );
+          
+          if (tcpResult.exitCode !== 0) {
+            lines.push(`⚠️  Gagal enable TCP mode: ${tcpResult.stderr}`);
+            lines.push("💡 Menggunakan koneksi existing (USB/local socket)");
+            
+            // Return info dari existing connection
+            const propResult = await runAdbCommand(
+              `adb -s ${existingEmulator.serial} shell getprop ro.product.model`,
+              undefined,
+              5000
+            );
+            const sdkResult = await runAdbCommand(
+              `adb -s ${existingEmulator.serial} shell getprop ro.build.version.sdk`,
+              undefined,
+              5000
+            );
+            const androidResult = await runAdbCommand(
+              `adb -s ${existingEmulator.serial} shell getprop ro.build.version.release`,
+              undefined,
+              5000
+            );
+            
+            lines.push("");
+            lines.push("📱 Info Emulator (Existing Connection):");
+            lines.push(`   Model   : ${propResult.stdout.trim() || "unknown"}`);
+            lines.push(`   Android : ${androidResult.stdout.trim() || "unknown"} (API ${sdkResult.stdout.trim() || "?"})`);
+            lines.push(`   Serial  : ${existingEmulator.serial}`);
+            lines.push("");
+            lines.push(`💡 Gunakan device_serial="${existingEmulator.serial}" di tools ADB lainnya.`);
+            
+            return { content: [{ type: "text", text: lines.join("\n") }] };
+          }
+          
+          await delay(1000); // Tunggu TCP mode aktif
+        }
+
         // Kill server dulu lalu restart (sering fix masalah koneksi IDX)
         await runAdbCommand("adb kill-server", undefined, 5000);
-        await new Promise((r) => setTimeout(r, 1000));
+        await delay(1000);
         await runAdbCommand("adb start-server", undefined, 5000);
+        await delay(1000);
 
         const connectResult = await runAdbCommand(
           `adb connect ${address}`,
@@ -659,6 +716,37 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           connectResult.stdout.includes("already connected");
 
         if (!success) {
+          // Jika gagal autentikasi tapi ada existing connection, gunakan itu
+          if (connectResult.stderr.includes("failed to authenticate") && existingEmulator) {
+            lines.push(`⚠️  TCP auth gagal, menggunakan koneksi existing: ${existingEmulator.serial}`);
+            
+            const propResult = await runAdbCommand(
+              `adb -s ${existingEmulator.serial} shell getprop ro.product.model`,
+              undefined,
+              5000
+            );
+            const sdkResult = await runAdbCommand(
+              `adb -s ${existingEmulator.serial} shell getprop ro.build.version.sdk`,
+              undefined,
+              5000
+            );
+            const androidResult = await runAdbCommand(
+              `adb -s ${existingEmulator.serial} shell getprop ro.build.version.release`,
+              undefined,
+              5000
+            );
+
+            lines.push("");
+            lines.push("📱 Info Emulator:");
+            lines.push(`   Model   : ${propResult.stdout.trim() || "unknown"}`);
+            lines.push(`   Android : ${androidResult.stdout.trim() || "unknown"} (API ${sdkResult.stdout.trim() || "?"})`);
+            lines.push(`   Serial  : ${existingEmulator.serial}`);
+            lines.push("");
+            lines.push(`💡 Gunakan device_serial="${existingEmulator.serial}" di tools ADB lainnya.`);
+            
+            return { content: [{ type: "text", text: lines.join("\n") }] };
+          }
+          
           lines.push(`❌ Koneksi gagal: ${connectResult.stdout.trim()}`);
           lines.push("");
           lines.push("💡 Troubleshooting IDX:");
@@ -686,7 +774,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
               booted = true;
               break;
             }
-            await new Promise((r) => setTimeout(r, 3000));
+            await delay(3000);
           }
 
           if (booted) {
@@ -1531,12 +1619,103 @@ export function registerIdxFirebaseTools(server: McpServer): void {
   // BAGIAN C — UI SCRAPING VIA EMULATOR (tanpa physical device)
   // ════════════════════════════════════════════════════════════════════════════
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // HEADLESS SCREENSHOT HELPERS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /** Generate ASCII art representation from UI bounds */
+  function generateAsciiVisual(nodes: Array<{
+    class: string;
+    resourceId: string;
+    text: string;
+    contentDesc: string;
+    clickable: boolean;
+    enabled: boolean;
+    bounds: string;
+    isInput: boolean;
+  }>, screenWidth = 1080, screenHeight = 1920): string {
+    const asciiWidth = 60;
+    const asciiHeight = 30;
+    
+    // Create empty grid
+    const grid: string[][] = Array(asciiHeight).fill(null).map(() => 
+      Array(asciiWidth).fill(' ')
+    );
+    
+    // Scale factor
+    const scaleX = asciiWidth / screenWidth;
+    const scaleY = asciiHeight / screenHeight;
+    
+    // Draw border
+    for (let x = 0; x < asciiWidth; x++) {
+      grid[0][x] = '─';
+      grid[asciiHeight - 1][x] = '─';
+    }
+    for (let y = 0; y < asciiHeight; y++) {
+      grid[y][0] = '│';
+      grid[y][asciiWidth - 1] = '│';
+    }
+    grid[0][0] = '┌';
+    grid[0][asciiWidth - 1] = '┐';
+    grid[asciiHeight - 1][0] = '└';
+    grid[asciiHeight - 1][asciiWidth - 1] = '┘';
+    
+    // Draw interactive elements
+    nodes.forEach((node, idx) => {
+      if (!node.enabled) return;
+      
+      const boundsMatch = node.bounds.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
+      if (!boundsMatch) return;
+      
+      const [, x1, y1, x2, y2] = boundsMatch.map(Number);
+      
+      // Scale to ASCII
+      const ax1 = Math.max(1, Math.floor(x1 * scaleX));
+      const ay1 = Math.max(1, Math.floor(y1 * scaleY));
+      const ax2 = Math.min(asciiWidth - 2, Math.ceil(x2 * scaleX));
+      const ay2 = Math.min(asciiHeight - 2, Math.ceil(y2 * scaleY));
+      
+      // Skip very small elements
+      if (ax2 - ax1 < 2 || ay2 - ay1 < 1) return;
+      
+      const char = node.isInput ? '▢' : node.clickable ? '◯' : '□';
+      const label = (node.text || node.contentDesc || '').slice(0, ax2 - ax1 - 1);
+      
+      // Draw element box
+      for (let y = ay1; y <= ay2 && y < asciiHeight - 1; y++) {
+        for (let x = ax1; x <= ax2 && x < asciiWidth - 1; x++) {
+          if (y === ay1 || y === ay2) {
+            grid[y][x] = '─';
+          } else if (x === ax1 || x === ax2) {
+            grid[y][x] = '│';
+          } else if (y === ay1 + 1 && x === ax1 + 1 && label) {
+            // Place text label
+            for (let i = 0; i < label.length && x + i < ax2; i++) {
+              grid[y][x + i] = label[i];
+            }
+          } else if (grid[y][x] === ' ') {
+            grid[y][x] = char;
+          }
+        }
+      }
+      
+      // Corners
+      if (ay1 < asciiHeight - 1 && ax1 < asciiWidth - 1) grid[ay1][ax1] = '┌';
+      if (ay1 < asciiHeight - 1 && ax2 < asciiWidth - 1) grid[ay1][ax2] = '┐';
+      if (ay2 < asciiHeight - 1 && ax1 < asciiWidth - 1) grid[ay2][ax1] = '└';
+      if (ay2 < asciiHeight - 1 && ax2 < asciiWidth - 1) grid[ay2][ax2] = '┘';
+    });
+    
+    return '\n' + grid.map(row => row.join('')).join('\n') + '\n';
+  }
+
   // ── C1. emulator_screenshot ───────────────────────────────────────────────
   server.tool(
     "emulator_screenshot",
     "Ambil screenshot dari emulator yang terkoneksi via ADB. " +
       "Alternatif utama saat tidak ada physical device. " +
-      "Screenshot disimpan lokal dan path-nya dikembalikan.",
+      "Screenshot disimpan lokal dan path-nya dikembalikan. " +
+      "✨ v5.3 UPDATE: Auto-fallback ke UI dump + ASCII visual untuk headless emulator.",
     {
       device_serial: z
         .string()
@@ -1549,10 +1728,14 @@ export function registerIdxFirebaseTools(server: McpServer): void {
       display_id: z
         .number()
         .int()
-        .default(0)
-        .describe("Display ID (0 = layar utama)"),
+        .optional()
+        .describe("Display ID (opsional, default: auto-detect). Di IDX biasanya skip ini."),
+      fallback_to_ui: z
+        .boolean()
+        .default(true)
+        .describe("Fallback ke UI dump + ASCII visual jika headless (default: true)"),
     },
-    async ({ device_serial, output_path, display_id }) => {
+    async ({ device_serial, output_path, display_id, fallback_to_ui }) => {
       try {
         const devices = await getConnectedDevicesList();
         if (devices.length === 0) {
@@ -1577,58 +1760,179 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           output_path ?? path.join(ssDir, `screenshot_${timestamp}.png`);
         const remotePath = `/sdcard/screenshot_${timestamp}.png`;
 
-        // Screencap via ADB
-        const capResult = await runAdbCommand(
-          `adb ${flag} shell screencap -p -d ${display_id} ${remotePath}`,
+        // Wake up device first (emulator might be asleep)
+        await runAdbCommand(`adb ${flag} shell input keyevent KEYCODE_WAKEUP`, undefined, 3000);
+        await delay(300);
+        
+        // Try to unlock screen if locked
+        await runAdbCommand(`adb ${flag} shell input keyevent 82`, undefined, 3000);
+        await delay(300);
+
+        // Method 1: Try exec-out screencap (direct to stdout, no temp file needed)
+        let capSuccess = false;
+        
+        const execOutResult = await runAdbCommand(
+          `adb ${flag} exec-out screencap -p`,
           undefined,
           15000
         );
+        
+        if (execOutResult.exitCode === 0 && execOutResult.stdout.length > 100) {
+          try {
+            const buffer = Buffer.from(execOutResult.stdout, 'binary');
+            await fs.writeFile(localPath, buffer);
+            capSuccess = true;
+          } catch {
+            capSuccess = false;
+          }
+        }
+        
+        // Method 2: Fallback to shell screencap with temp file
+        if (!capSuccess) {
+          let capResult = await runAdbCommand(
+            `adb ${flag} shell screencap -p ${remotePath}`,
+            undefined,
+            15000
+          );
 
-        if (capResult.exitCode !== 0) {
+          if (capResult.exitCode === 0) {
+            const pullResult = await runAdbCommand(
+              `adb ${flag} pull ${remotePath} "${localPath}"`,
+              undefined,
+              15000
+            );
+            
+            await runAdbCommand(`adb ${flag} shell rm ${remotePath}`, undefined, 5000);
+            
+            if (pullResult.exitCode === 0) {
+              capSuccess = true;
+            }
+          }
+        }
+
+        if (capSuccess) {
+          const stat = await fs.stat(localPath);
+          const sizeKb = (stat.size / 1024).toFixed(1);
+
           return {
             content: [
               {
                 type: "text",
-                text: `❌ Screencap gagal:\n${capResult.stderr}`,
+                text:
+                  "📸 Emulator Screenshot\n" +
+                  "─".repeat(55) +
+                  `\nDevice : ${device_serial ?? devices[0]?.serial ?? "default"}` +
+                  `\nSaved  : ${localPath}` +
+                  `\nSize   : ${sizeKb} KB`,
               },
             ],
           };
         }
 
-        // Pull ke lokal
-        const pullResult = await runAdbCommand(
-          `adb ${flag} pull ${remotePath} "${localPath}"`,
-          undefined,
-          15000
-        );
-
-        // Cleanup remote
-        await runAdbCommand(`adb ${flag} shell rm ${remotePath}`, undefined, 5000);
-
-        if (pullResult.exitCode !== 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `❌ Pull screenshot gagal:\n${pullResult.stderr}`,
-              },
-            ],
-          };
+        // ═══════════════════════════════════════════════════════════════════════
+        // HEADLESS MODE FALLBACK - UI DUMP + ASCII VISUAL
+        // ═══════════════════════════════════════════════════════════════════════
+        if (fallback_to_ui) {
+          const remoteDump = `/sdcard/ui_ss_${timestamp}.xml`;
+          const localDump = path.join(os.tmpdir(), `ui_ss_${timestamp}.xml`);
+          
+          // Try UI dump
+          const dumpResult = await runAdbCommand(
+            `adb ${flag} shell uiautomator dump --compressed ${remoteDump}`,
+            undefined,
+            20000
+          );
+          
+          if (dumpResult.exitCode === 0) {
+            await runAdbCommand(
+              `adb ${flag} pull ${remoteDump} "${localDump}"`,
+              undefined,
+              10000
+            );
+            await runAdbCommand(`adb ${flag} shell rm ${remoteDump}`, undefined, 5000);
+            
+            const xmlContent = await fs.readFile(localDump, "utf-8").catch(() => "");
+            await fs.unlink(localDump).catch(() => {});
+            
+            // Parse nodes for ASCII visual
+            const nodePattern =
+              /<node[^>]*class="([^"]*)"[^>]*resource-id="([^"]*)"[^>]*text="([^"]*)"[^>]*content-desc="([^"]*)"[^>]*clickable="([^"]*)"[^>]*enabled="([^"]*)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/g;
+            
+            const nodes: Array<{
+              class: string;
+              resourceId: string;
+              text: string;
+              contentDesc: string;
+              clickable: boolean;
+              enabled: boolean;
+              bounds: string;
+              isInput: boolean;
+            }> = [];
+            
+            let match;
+            while ((match = nodePattern.exec(xmlContent)) !== null) {
+              const [, cls, resourceId, text, contentDesc, clickable, enabled, x1, y1, x2, y2] = match;
+              const isInput = (cls?.includes("EditText") || cls?.includes("Input") || cls?.includes("TextField")) ?? false;
+              
+              nodes.push({
+                class: cls?.split(".").pop() ?? cls ?? "",
+                resourceId: resourceId ?? "",
+                text: text ?? "",
+                contentDesc: contentDesc ?? "",
+                clickable: clickable === "true",
+                enabled: enabled === "true",
+                bounds: `[${x1},${y1}][${x2},${y2}]`,
+                isInput,
+              });
+            }
+            
+            const interactiveNodes = nodes.filter(n => n.clickable && n.enabled);
+            const texts = nodes.filter(n => n.text).map(n => n.text).slice(0, 15);
+            
+            // Generate ASCII visual
+            const asciiVisualFallback = generateAsciiVisual(nodes);
+            
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    `📸 Emulator Screenshot (Headless Mode - ASCII Visual)\n` +
+                    `═`.repeat(55) + `\n` +
+                    `Device : ${device_serial ?? devices[0]?.serial ?? "default"}\n` +
+                    `Mode   : 🧠 Headless (UI Dump + ASCII Visual)\n` +
+                    `─`.repeat(55) + `\n\n` +
+                    `🖼️  LAYOUT VISUAL (ASCII):\n${asciiVisualFallback}\n\n` +
+                    `📊 STATISTIK:\n` +
+                    `   Total nodes    : ${nodes.length}\n` +
+                    `   Interactive    : ${interactiveNodes.length}\n` +
+                    `   Text elements  : ${nodes.filter(n => n.text).length}\n\n` +
+                    `💬 TEKS TERLIHAT:\n` +
+                    (texts.length > 0 ? texts.map(t => `   • ${t}`).join('\n') : '   (tidak ada teks)') +
+                    `\n\n` +
+                    `─`.repeat(55) + `\n` +
+                    `💡 Tips: Gunakan 'emulator_ui_dump' untuk detail lengkap\n` +
+                    `        atau 'ftl_run_test' untuk screenshot nyata di Test Lab.`,
+                },
+              ],
+            };
+          }
         }
 
-        const stat = await fs.stat(localPath);
-        const sizeKb = (stat.size / 1024).toFixed(1);
-
+        // Final fallback - error message
         return {
           content: [
             {
               type: "text",
               text:
-                "📸 Emulator Screenshot\n" +
-                "─".repeat(55) +
-                `\nDevice : ${device_serial ?? devices[0]?.serial ?? "default"}` +
-                `\nSaved  : ${localPath}` +
-                `\nSize   : ${sizeKb} KB`,
+                `❌ Screenshot gagal - Emulator dalam mode headless\n` +
+                `═`.repeat(55) + `\n\n` +
+                `💡 Penjelasan:\n` +
+                `   Emulator berjalan tanpa display fisik (headless mode).\n\n` +
+                `🔧 Alternatif:\n` +
+                `   1. emulator_ui_dump - Analisis struktur UI\n` +
+                `   2. adb_logcat - Monitoring log aplikasi\n` +
+                `   3. ftl_run_test - Screenshot di device cloud`,
             },
           ],
         };
@@ -1657,12 +1961,13 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         .optional()
         .describe("Serial device/emulator"),
       parse_mode: z
-        .enum(["summary", "interactive_only", "full_xml", "text_only"])
+        .enum(["summary", "interactive_only", "full_xml", "text_only", "ascii_visual"])
         .default("summary")
         .describe(
           "Mode output: summary=ringkasan AI-friendly, " +
             "interactive_only=hanya elemen yang bisa diklik/diketik, " +
-            "full_xml=XML mentah, text_only=teks terlihat saja"
+            "full_xml=XML mentah, text_only=teks terlihat saja, " +
+            "ascii_visual=visualisasi ASCII art dari layout"
         ),
       package_filter: z
         .string()
@@ -1687,21 +1992,50 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         const remotePath = "/sdcard/ui_dump.xml";
         const localPath = path.join(os.tmpdir(), `ui_dump_${Date.now()}.xml`);
 
-        // Dump UI
-        const dumpResult = await runAdbCommand(
+        // Wake up device first
+        await runAdbCommand(`adb ${flag} shell input keyevent KEYCODE_WAKEUP`, undefined, 3000);
+        await delay(200);
+        
+        // Try to unlock
+        await runAdbCommand(`adb ${flag} shell input keyevent 82`, undefined, 3000);
+        await delay(300);
+
+        // Dump UI with retry
+        let dumpResult = await runAdbCommand(
           `adb ${flag} shell uiautomator dump --compressed ${remotePath}`,
           undefined,
           30000
         );
 
+        // Retry if failed
         if (dumpResult.exitCode !== 0) {
+          await delay(1000);
+          dumpResult = await runAdbCommand(
+            `adb ${flag} shell uiautomator dump ${remotePath}`,
+            undefined,
+            30000
+          );
+        }
+
+        if (dumpResult.exitCode !== 0) {
+          // Try alternative: check if screen is on
+          const screenState = await runAdbCommand(
+            `adb ${flag} shell dumpsys power | grep "mWakefulness"`,
+            undefined,
+            5000
+          );
+          
           return {
             content: [
               {
                 type: "text",
                 text:
-                  `❌ UI dump gagal:\n${dumpResult.stderr}\n` +
-                  "Pastikan emulator sudah boot dan layar tidak terkunci.",
+                  `❌ UI dump gagal:\n${dumpResult.stderr}\n\n` +
+                  `💡 Troubleshooting:\n` +
+                  `   • Screen state: ${screenState.stdout || 'unknown'}\n` +
+                  `   • Pastikan emulator sudah boot (sys.boot_completed = 1)\n` +
+                  `   • Coba wake up manual: adb shell input keyevent KEYCODE_WAKEUP\n` +
+                  `   • Cek: adb shell dumpsys window | grep mCurrentFocus`,
               },
             ],
           };
@@ -1729,7 +2063,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           };
         }
 
-        // Parse XML untuk mode lainnya
+        // Parse XML untuk semua mode
         const nodePattern =
           /<node[^>]*class="([^"]*)"[^>]*resource-id="([^"]*)"[^>]*text="([^"]*)"[^>]*content-desc="([^"]*)"[^>]*checkable="([^"]*)"[^>]*checked="([^"]*)"[^>]*clickable="([^"]*)"[^>]*enabled="([^"]*)"[^>]*focusable="([^"]*)"[^>]*focused="([^"]*)"[^>]*scrollable="([^"]*)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"/g;
 
@@ -1812,6 +2146,32 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         const interactive = nodes.filter(
           (n) => (n.clickable || n.isInput) && n.enabled
         );
+        
+        // ASCII Visual mode - return early with visual representation
+        if (parse_mode === "ascii_visual") {
+          const asciiVisual = generateAsciiVisual(nodes);
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `🖼️  UI Layout - ASCII Visual\n` +
+                  `═`.repeat(55) + `\n` +
+                  `Device : ${device_serial ?? devices[0]?.serial ?? "default"}\n` +
+                  `Mode   : ascii_visual\n` +
+                  `─`.repeat(55) + `\n` +
+                  asciiVisual + `\n` +
+                  `─`.repeat(55) + `\n` +
+                  `📊 Statistik:\n` +
+                  `   Total nodes    : ${nodes.length}\n` +
+                  `   Interactive    : ${interactive.length}\n` +
+                  `   Input fields   : ${nodes.filter((n) => n.isInput).length}\n\n` +
+                  `Legend: ◯ = clickable  ▢ = input  □ = other`,
+              },
+            ],
+          };
+        }
+        
         const all = parse_mode === "summary" ? nodes : interactive;
 
         const lines: string[] = [
@@ -1924,6 +2284,13 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         }
 
         const flag = device_serial ? `-s ${device_serial}` : "";
+        
+        // Wake up device before interaction
+        await runAdbCommand(`adb ${flag} shell input keyevent KEYCODE_WAKEUP`, undefined, 3000);
+        await delay(200);
+        // Try unlock
+        await runAdbCommand(`adb ${flag} shell input keyevent 82`, undefined, 3000);
+        await delay(300);
         let tapX = x;
         let tapY = y;
         let targetText: string | undefined = text;
@@ -2118,6 +2485,13 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         }
 
         const flag = device_serial ? `-s ${device_serial}` : "";
+        
+        // Wake up device before interaction
+        await runAdbCommand(`adb ${flag} shell input keyevent KEYCODE_WAKEUP`, undefined, 3000);
+        await delay(200);
+        await runAdbCommand(`adb ${flag} shell input keyevent 82`, undefined, 3000);
+        await delay(300);
+        
         const lines: string[] = [
           "⌨️  Input Text (Stabilized v5.2)",
           "─".repeat(55),

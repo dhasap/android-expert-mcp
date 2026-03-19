@@ -22,6 +22,33 @@
  */
 import { z } from "zod";
 import { maskSecrets, truncateOutput } from "../utils.js";
+import * as fs from "fs/promises";
+import * as path from "path";
+// ═══════════════════════════════════════════════════════════════════════════
+// ENVIRONMENT CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════
+/** Load token from .env file if exists */
+async function loadEnvFile() {
+    try {
+        const envPath = path.join(process.cwd(), '.env');
+        const content = await fs.readFile(envPath, 'utf-8');
+        content.split('\n').forEach(line => {
+            const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+            if (match) {
+                const [, key, value] = match;
+                // Only set if not already set in environment
+                if (!process.env[key]) {
+                    process.env[key] = value.trim();
+                }
+            }
+        });
+    }
+    catch {
+        // .env file doesn't exist or can't be read, skip
+    }
+}
+// Load .env file on module import
+await loadEnvFile();
 // ─── GitHub API client ────────────────────────────────────────────────────────
 const GITHUB_API = "https://api.github.com";
 const DEFAULT_OWNER = "dhasap";
