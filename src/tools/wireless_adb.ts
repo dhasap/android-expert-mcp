@@ -475,8 +475,10 @@ export function registerWirelessAdbTools(server: McpServer): void {
           5_000
         ).catch(() => null);
 
-        // Verify local file exists
+        // Verify local file exists and read for LLM
         await fs.access(localPath);
+        const imageBuffer = await fs.readFile(localPath);
+        const base64Image = imageBuffer.toString('base64');
 
         return {
           content: [
@@ -489,6 +491,11 @@ export function registerWirelessAdbTools(server: McpServer): void {
                 `Display : ${display_id}\n` +
                 `Saved   : ${localPath}\n\n` +
                 `✅ Screenshot berhasil disimpan!`,
+            },
+            {
+              type: "image",
+              data: base64Image,
+              mimeType: "image/png",
             },
           ],
         };

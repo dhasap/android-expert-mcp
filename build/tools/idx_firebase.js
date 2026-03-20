@@ -1342,6 +1342,9 @@ export function registerIdxFirebaseTools(server) {
             if (capSuccess) {
                 const stat = await fs.stat(localPath);
                 const sizeKb = (stat.size / 1024).toFixed(1);
+                // Read the PNG file and encode as base64 for LLM
+                const imageBuffer = await fs.readFile(localPath);
+                const base64Image = imageBuffer.toString('base64');
                 return {
                     content: [
                         {
@@ -1351,6 +1354,11 @@ export function registerIdxFirebaseTools(server) {
                                 `\nDevice : ${device_serial ?? devices[0]?.serial ?? "default"}` +
                                 `\nSaved  : ${localPath}` +
                                 `\nSize   : ${sizeKb} KB`,
+                        },
+                        {
+                            type: "image",
+                            data: base64Image,
+                            mimeType: "image/png",
                         },
                     ],
                 };
@@ -1744,6 +1752,7 @@ export function registerIdxFirebaseTools(server) {
             }
             // Screenshot after action
             let ssInfo = "";
+            let base64Image;
             if (doScreenshot) {
                 await delay(500); // Wait for UI to settle
                 const ssDir = path.join(os.tmpdir(), "mcp-emulator");
@@ -1755,6 +1764,9 @@ export function registerIdxFirebaseTools(server) {
                     await runAdbCommand(`adb ${flag} pull ${remoteSs} "${ssPath}"`, undefined, 10000);
                     await runAdbCommand(`adb ${flag} shell rm ${remoteSs}`, undefined, 5000);
                     ssInfo = `\n📸 Screenshot: ${ssPath}`;
+                    // Read and encode the screenshot
+                    const imageBuffer = await fs.readFile(ssPath);
+                    base64Image = imageBuffer.toString('base64');
                 }
                 catch {
                     ssInfo = "\n📸 Screenshot: (gagal)";
@@ -1762,6 +1774,28 @@ export function registerIdxFirebaseTools(server) {
             }
             const statusIcon = result.success ? "✅" : "❌";
             const attemptsInfo = result.attempts ? ` (retry: ${result.attempts}x)` : "";
+            // Add image content if screenshot was successful
+            if (base64Image) {
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `${statusIcon} ${action}${attemptsInfo}\n` +
+                                "─".repeat(55) +
+                                (tapX !== undefined ? `\nKoord   : (${tapX}, ${tapY})` : "") +
+                                (text ? `\nTarget  : "${text}"` : "") +
+                                (resource_id ? `\nID      : ${resource_id}` : "") +
+                                `\nStatus  : ${result.message}` +
+                                ssInfo,
+                        },
+                        {
+                            type: "image",
+                            data: base64Image,
+                            mimeType: "image/png",
+                        },
+                    ],
+                };
+            }
             return {
                 content: [
                     {
@@ -1865,6 +1899,7 @@ export function registerIdxFirebaseTools(server) {
             }
             // Screenshot after input
             let ssInfo = "";
+            let base64Image;
             if (doScreenshot) {
                 await delay(500);
                 const ssDir = path.join(os.tmpdir(), "mcp-emulator");
@@ -1876,12 +1911,28 @@ export function registerIdxFirebaseTools(server) {
                     await runAdbCommand(`adb ${flag} pull ${remoteSs} "${ssPath}"`, undefined, 10000);
                     await runAdbCommand(`adb ${flag} shell rm ${remoteSs}`, undefined, 5000);
                     ssInfo = `\n📸 Screenshot: ${ssPath}`;
+                    // Read and encode the screenshot
+                    const imageBuffer = await fs.readFile(ssPath);
+                    base64Image = imageBuffer.toString('base64');
                 }
                 catch {
                     ssInfo = "\n📸 Screenshot: (gagal)";
                 }
             }
             lines.push(ssInfo);
+            // Add image content if screenshot was successful
+            if (base64Image) {
+                return {
+                    content: [
+                        { type: "text", text: lines.join("\n") },
+                        {
+                            type: "image",
+                            data: base64Image,
+                            mimeType: "image/png",
+                        },
+                    ],
+                };
+            }
             return {
                 content: [{ type: "text", text: lines.join("\n") }],
             };
