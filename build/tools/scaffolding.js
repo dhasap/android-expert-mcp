@@ -745,9 +745,7 @@ export async function initDb() {
 // ─── Tool Registration ────────────────────────────────────────────────────────
 export function registerScaffoldingTools(server) {
     // ── 1. scaffold_android ───────────────────────────────────────────────────
-    server.tool("scaffold_android", "Generate project Android lengkap dengan Kotlin + Jetpack Compose. " +
-        "Termasuk build.gradle.kts, Version Catalog, tema, dan struktur MVVM/Clean. " +
-        "Pilih dependencies: Room, Retrofit, Hilt sesuai kebutuhan.", {
+    server.tool("scaffold_android", "Generate project Android dengan Kotlin + Jetpack Compose. Include build.gradle.kts, tema, MVVM.", {
         output_dir: z.string().describe("Direktori output project"),
         app_name: z.string().describe("Nama aplikasi, misal 'MyAwesomeApp'"),
         package_name: z

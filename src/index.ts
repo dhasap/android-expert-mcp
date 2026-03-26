@@ -25,15 +25,15 @@ import { registerAndroidTools } from "./tools/android.js";
 import { registerScrapingTools } from "./tools/scraping.js";
 import { registerAuditTools } from "./tools/audit.js";
 import { registerBrowserTools, closeAllBrowserSessions } from "./tools/browser.js";
-import { registerInteractiveTools } from "./tools/interactive.js";
+// import { registerInteractiveTools } from "./tools/interactive.js"; // REMOVED - conflict with Moonshot schema
 import { registerIdxFirebaseTools } from "./tools/idx_firebase.js";
 import { registerErrorMemoryTools } from "./tools/error_memory.js";
-import { registerScaffoldingTools } from "./tools/scaffolding.js";
+// import { registerScaffoldingTools } from "./tools/scaffolding.js"; // REMOVED - conflict with Moonshot schema
 import { registerVpsTools } from "./tools/vps_deploy.js";
 import { registerWirelessAdbTools } from "./tools/wireless_adb.js";
 import { registerGithubTools } from "./tools/github.js";
 import { registerContextManagerTools } from "./tools/context_manager.js";
-import { registerAdvancedTestingTools } from "./tools/advanced_testing.js";
+import { registerAdvancedTestingTools, closeAllMockServers } from "./tools/advanced_testing.js";
 import { cleanupTempDirectories } from "./utils.js";
 
 async function main(): Promise<void> {
@@ -42,8 +42,8 @@ async function main(): Promise<void> {
     version: "5.3.0",
     description:
       "Expert MCP: Android/Kotlin dev, web scraping, website auditing, " +
-      "browser control, UI widgets, IDX/Firebase, Error Memory, Scaffolding, " +
-      "VPS Deploy, Wireless ADB, GitHub Integration, Context Manager, " +
+      "browser control, IDX/Firebase, Error Memory, " +
+      "VPS Deploy, GitHub Integration, Context Manager, " +
       "Advanced Testing (API, Performance, Security, Push Notification)",
   });
 
@@ -52,12 +52,12 @@ async function main(): Promise<void> {
   registerScrapingTools(server);          // Cat 3  — 4 tools
   registerAuditTools(server);             // Cat 4  — 5 tools
   registerBrowserTools(server);           // Cat 5  — 14 tools
-  registerInteractiveTools(server);       // Cat 6  — 9 tools
+  // registerInteractiveTools(server);       // Cat 6  — 9 tools // REMOVED
   registerIdxFirebaseTools(server);       // Cat 7  — 13 tools
   registerErrorMemoryTools(server);       // Cat 8  — 6 tools
-  registerScaffoldingTools(server);       // Cat 9  — 4 tools
+  // registerScaffoldingTools(server);       // Cat 9  — 4 tools // REMOVED
   registerVpsTools(server);               // Cat 10 — 10 tools
-  registerWirelessAdbTools(server);       // Cat 11 — 8 tools
+  registerWirelessAdbTools(server);       // Cat 11  — 8 tools
   registerGithubTools(server);            // Cat 12 — 10 tools
   registerContextManagerTools(server);    // Cat 13 — 7 tools
   registerAdvancedTestingTools(server);    // Cat 14 — 10 tools
@@ -66,10 +66,10 @@ async function main(): Promise<void> {
   await server.connect(transport);
 
   process.stderr.write(
-    `[android-expert-mcp v5.1] Server started — 13 categories, 104 tools\n` +
-    `  Arch(6) Android(8) Scraping(4) Audit(5) Browser(14) UI(9)\n` +
-    `  IDX+FTL(13) ErrorMemory(6) Scaffold(4) VPS(10)\n` +
-    `  WirelessADB(8) GitHub(10) ContextManager(7)\n`
+    `[android-expert-mcp v5.3] Server started — 12 categories, 101 tools\n` +
+    `  Arch(6) Android(8) Scraping(4) Audit(5) Browser(14)\n` +
+    `  IDX+FTL(13) ErrorMemory(6) VPS(10)\n` +
+    `  WirelessADB(8) GitHub(10) ContextManager(7) AdvancedTesting(10)\n`
   );
 
   const runCleanup = () => {
@@ -86,6 +86,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     process.stderr.write("[android-expert-mcp] Shutting down...\n");
     try { await closeAllBrowserSessions(); } catch { /* non-fatal */ }
+    try { await closeAllMockServers(); } catch { /* non-fatal */ }
     try { await server.close(); } catch { /* non-fatal */ }
     process.exit(0);
   };

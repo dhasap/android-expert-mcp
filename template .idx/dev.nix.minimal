@@ -1,0 +1,82 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .idx/dev.nix — MCP Server Only (Minimal)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Template minimal untuk yang hanya butuh MCP Server tools:
+#   • Web Scraping (Puppeteer)
+#   • Browser Control
+#   • VPS Deploy
+#   • GitHub Integration
+#
+# TIDAK termasuk: Android SDK, Firebase Emulator
+#
+# CARA PAKAI:
+#   1. Copy file ini ke .idx/dev.nix di root project
+#   2. Di IDX: klik "Rebuild Environment"
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+{ pkgs, ... }: {
+
+  channel = "stable-25.05";
+
+  # ── Packages ────────────────────────────────────────────────────────────────
+  packages = [
+    # Node.js untuk MCP Server
+    pkgs.nodejs_20
+
+    # Chromium untuk Puppeteer
+    pkgs.chromium
+
+    # Python
+    pkgs.python311
+
+    # SSH & VPS Tools
+    pkgs.openssh
+    pkgs.sshpass
+    pkgs.rsync
+
+    # Git & Tools
+    pkgs.git
+    pkgs.curl
+    pkgs.wget
+  ];
+
+  # ── Environment ─────────────────────────────────────────────────────────────
+  env = {
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true";
+    PUPPETEER_EXECUTABLE_PATH = "${pkgs.chromium}/bin/chromium";
+    SSH_CONFIG_DIR = "$HOME/.ssh";
+  };
+
+  # ── IDX config ───────────────────────────────────────────────────────────────
+  idx = {
+    # Tidak ada preview untuk minimal setup
+    previews = { enable = false; };
+
+    workspace = {
+      onCreate = {
+        setup-ssh = ''
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          echo "✅ SSH directory ready"
+        '';
+      };
+
+      onStart = {
+        info = ''
+          echo "═══════════════════════════════════════"
+          echo "  🤖 MCP Server Workspace (Minimal)"
+          echo "═══════════════════════════════════════"
+          echo ""
+          echo "  Available:"
+          echo "    • Web Scraping"
+          echo "    • Browser Control"
+          echo "    • VPS Deploy"
+          echo "    • GitHub Integration"
+          echo "═══════════════════════════════════════"
+        '';
+      };
+    };
+  };
+}

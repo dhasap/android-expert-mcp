@@ -276,9 +276,7 @@ export function registerArchitectureTools(server: McpServer): void {
   // ── 5. create_architecture_doc ────────────────────────────────────────────
   server.tool(
     "create_architecture_doc",
-    "Creates a structured architecture documentation markdown file with standard sections: " +
-      "Overview, Tech Stack, Module Breakdown, Data Flow, API Contracts, and Notes. " +
-      "Saves to the specified path.",
+    "Create architecture documentation markdown dengan sections: Overview, Tech Stack, Module, Data Flow.",
     {
       output_path: z
         .string()

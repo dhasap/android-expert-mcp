@@ -104,6 +104,24 @@ export async function runStreamingCommand(
   });
 }
 
+// ─── Shell escaping for security ─────────────────────────────────────────────
+
+/**
+ * Escape a string for safe use in shell commands.
+ * Prevents command injection attacks.
+ */
+export function shellEscape(str: string): string {
+  if (!str) return str;
+  return str
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, "\\\"")
+    .replace(/\$/g, "\\$")
+    .replace(/`/g, "\\`")
+    .replace(/!/g, "\\!")
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r");
+}
+
 // ─── File system helpers ─────────────────────────────────────────────────────
 
 /**
@@ -168,13 +186,16 @@ export async function safeReadFile(
   const stat = await fs.stat(filePath);
   if (stat.size > maxSizeBytes) {
     const fd = await fs.open(filePath, "r");
-    const buffer = Buffer.alloc(maxSizeBytes);
-    await fd.read(buffer, 0, maxSizeBytes, 0);
-    await fd.close();
-    return {
-      content: buffer.toString("utf-8") + "\n\n... [FILE TRUNCATED — too large to display fully]",
-      truncated: true,
-    };
+    try {
+      const buffer = Buffer.alloc(maxSizeBytes);
+      await fd.read(buffer, 0, maxSizeBytes, 0);
+      return {
+        content: buffer.toString("utf-8") + "\n\n... [FILE TRUNCATED — too large to display fully]",
+        truncated: true,
+      };
+    } finally {
+      await fd.close();
+    }
   }
   return { content: await fs.readFile(filePath, "utf-8"), truncated: false };
 }
@@ -212,7 +233,10 @@ export class Mutex {
       release = resolve;
     });
     const ticket = this._queue.then(() => release);
-    this._queue = this._queue.then(() => next);
+    this._queue = this._queue.then(() => next).catch(() => {
+      // Ignore errors in the chain - they should be handled by the caller
+      // This prevents unhandled promise rejections
+    });
     return ticket;
   }
 }
@@ -455,14 +479,36 @@ export async function atomicReadJson<T>(
 /**
  * Write data to a JSON file atomically using a `.tmp` side-file + rename.
  * This prevents a corrupt file if the process crashes mid-write.
+ * Uses fsync to ensure data is flushed to disk before rename.
  */
 export async function atomicWriteJson(
   filePath: string,
   data: unknown
 ): Promise<void> {
   const tmp = filePath + ".tmp";
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2), "utf-8");
+  const content = JSON.stringify(data, null, 2);
+  
+  // Write to temp file with explicit flush
+  const fd = await fs.open(tmp, 'w');
+  try {
+    await fd.writeFile(content, "utf-8");
+    await fd.sync(); // Ensure data is flushed to disk
+  } finally {
+    await fd.close();
+  }
+  
+  // Atomic rename
   await fs.rename(tmp, filePath);
+  
+  // Sync parent directory to ensure rename is persisted
+  try {
+    const dir = path.dirname(filePath);
+    const dirFd = await fs.open(dir, 'r');
+    await dirFd.sync();
+    await dirFd.close();
+  } catch {
+    // Ignore errors on directory sync - not critical
+  }
 }
 
 // ─── Stack trace extraction ───────────────────────────────────────────────────

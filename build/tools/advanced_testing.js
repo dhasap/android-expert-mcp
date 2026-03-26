@@ -54,6 +54,25 @@ async function makeHttpRequest(url, method, headers, body, timeoutMs = 30000) {
 }
 // Global mock servers storage
 const mockServers = new Map();
+/**
+ * Close all active mock HTTP servers.
+ * Called during graceful shutdown to prevent hanging processes.
+ */
+export async function closeAllMockServers() {
+    const closing = [...mockServers.entries()].map(async ([id, ms]) => {
+        try {
+            await new Promise((resolve) => {
+                ms.server.close(() => resolve());
+            });
+        }
+        catch {
+            // Ignore — server may already be closed
+        }
+    });
+    await Promise.allSettled(closing);
+    mockServers.clear();
+    process.stderr.write(`[advanced_testing] All mock servers closed (${closing.length} servers)\n`);
+}
 export function registerAdvancedTestingTools(server) {
     // ── 1. api_send_request ─────────────────────────────────────────────────
     server.tool("api_send_request", "Kirim HTTP request (GET, POST, PUT, DELETE, PATCH) dengan custom headers dan body.", {
@@ -136,7 +155,9 @@ export function registerAdvancedTestingTools(server) {
                         lines.push(`❌ Server '${server_id}' not found`);
                     }
                     else {
-                        mockServer.server.close();
+                        await new Promise((resolve) => {
+                            mockServer.server.close(() => resolve());
+                        });
                         mockServers.delete(server_id);
                         lines.push(`✅ Server '${server_id}' stopped`);
                     }

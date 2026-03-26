@@ -22,6 +22,7 @@ import {
   truncateOutput,
   ensureDir,
   getTempDir,
+  shellEscape,
 } from "../utils.js";
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
@@ -62,7 +63,7 @@ async function getConnectedDevices(): Promise<string[]> {
     .slice(1)
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith("*") && l.includes("\t"))
-    .map((l) => l.split("\t")[0]!.trim())
+    .map((l) => (l.split("\t")[0] ?? "").trim())
     .filter(Boolean);
 }
 
@@ -104,8 +105,8 @@ export function registerAndroidTools(server: McpServer): void {
         const resolvedPath = path.resolve(project_path);
         const gradlew = await resolveGradlew(resolvedPath);
 
-        // Ensure gradlew is executable
-        await runCommand(`chmod +x ${gradlew}`, resolvedPath, 5_000);
+        // Ensure gradlew is executable (with shell escaping for security)
+        await runCommand(`chmod +x "${shellEscape(gradlew)}"`, resolvedPath, 5_000);
 
         const args = [gradlew, task, "--no-daemon"];
         if (extra_args) args.push(extra_args);
@@ -335,6 +336,9 @@ export function registerAndroidTools(server: McpServer): void {
         }
 
         const xmlContent = await fs.readFile(localPath, "utf-8");
+        
+        // Cleanup temp file
+        await fs.unlink(localPath).catch(() => {});
 
         // Parse summary: count elements
         const nodeCount = (xmlContent.match(/<node /g) || []).length;
@@ -485,6 +489,16 @@ export function registerAndroidTools(server: McpServer): void {
     },
     async ({ package_name, output_dir, device_serial }) => {
       try {
+        // Validate package_name format (security)
+        if (!/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/.test(package_name)) {
+          return {
+            content: [{
+              type: "text",
+              text: `❌ Invalid package name format: '${package_name}'. Must be valid Android package (e.g., com.example.app).`,
+            }],
+          };
+        }
+
         const adbCheck = await checkAdbAvailable();
         if (!adbCheck.available) {
           return {
@@ -500,10 +514,11 @@ export function registerAndroidTools(server: McpServer): void {
         }
 
         const flag = deviceFlag(device_serial);
+        const safePackageName = shellEscape(package_name);
 
         // Find APK path on device
         const pathResult = await runAdbCommand(
-          `adb ${flag} shell pm path ${package_name}`,
+          `adb ${flag} shell pm path "${safePackageName}"`,
           undefined,
           15_000
         );
@@ -530,7 +545,7 @@ export function registerAndroidTools(server: McpServer): void {
         const localPath = path.join(resolvedOutputDir, fileName);
 
         const pullResult = await runAdbCommand(
-          `adb ${flag} pull "${remotePath}" "${localPath}"`,
+          `adb ${flag} pull "${shellEscape(remotePath)}" "${shellEscape(localPath)}"`,
           undefined,
           60_000
         );
@@ -591,6 +606,21 @@ export function registerAndroidTools(server: McpServer): void {
     },
     async ({ command, device_serial, timeout_seconds }) => {
       try {
+        // Security: Block extremely dangerous commands
+        const dangerousPatterns = [
+          /rm\s+-rf\s+\/\s*$/i,  // rm -rf /
+          /mkfs\./i,              // filesystem formatting
+          /dd\s+if=.*of=\/dev/i,  // direct disk write
+        ];
+        if (dangerousPatterns.some((p) => p.test(command.trim()))) {
+          return {
+            content: [{
+              type: "text",
+              text: `❌ Command blocked for safety: '${command}'. Potentially destructive operation detected.`,
+            }],
+          };
+        }
+
         const adbCheck = await checkAdbAvailable();
         if (!adbCheck.available) {
           return {

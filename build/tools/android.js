@@ -11,7 +11,7 @@ import { z } from "zod";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
-import { runCommand, runStreamingCommand, runAdbCommand, extractStackTrace, formatToolError, truncateOutput, ensureDir, } from "../utils.js";
+import { runCommand, runStreamingCommand, runAdbCommand, extractStackTrace, formatToolError, truncateOutput, ensureDir, shellEscape, } from "../utils.js";
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 async function resolveGradlew(projectPath) {
     const candidates = [
@@ -46,7 +46,7 @@ async function getConnectedDevices() {
         .slice(1)
         .map((l) => l.trim())
         .filter((l) => l && !l.startsWith("*") && l.includes("\t"))
-        .map((l) => l.split("\t")[0].trim())
+        .map((l) => (l.split("\t")[0] ?? "").trim())
         .filter(Boolean);
 }
 function deviceFlag(deviceSerial) {
@@ -80,8 +80,8 @@ export function registerAndroidTools(server) {
         try {
             const resolvedPath = path.resolve(project_path);
             const gradlew = await resolveGradlew(resolvedPath);
-            // Ensure gradlew is executable
-            await runCommand(`chmod +x ${gradlew}`, resolvedPath, 5_000);
+            // Ensure gradlew is executable (with shell escaping for security)
+            await runCommand(`chmod +x "${shellEscape(gradlew)}"`, resolvedPath, 5_000);
             const args = [gradlew, task, "--no-daemon"];
             if (extra_args)
                 args.push(extra_args);
@@ -261,6 +261,8 @@ export function registerAndroidTools(server) {
                 };
             }
             const xmlContent = await fs.readFile(localPath, "utf-8");
+            // Cleanup temp file
+            await fs.unlink(localPath).catch(() => { });
             // Parse summary: count elements
             const nodeCount = (xmlContent.match(/<node /g) || []).length;
             const clickableCount = (xmlContent.match(/clickable="true"/g) || []).length;
@@ -385,6 +387,15 @@ export function registerAndroidTools(server) {
         device_serial: z.string().optional().describe("ADB device serial"),
     }, async ({ package_name, output_dir, device_serial }) => {
         try {
+            // Validate package_name format (security)
+            if (!/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/.test(package_name)) {
+                return {
+                    content: [{
+                            type: "text",
+                            text: `❌ Invalid package name format: '${package_name}'. Must be valid Android package (e.g., com.example.app).`,
+                        }],
+                };
+            }
             const adbCheck = await checkAdbAvailable();
             if (!adbCheck.available) {
                 return {
@@ -398,8 +409,9 @@ export function registerAndroidTools(server) {
                 };
             }
             const flag = deviceFlag(device_serial);
+            const safePackageName = shellEscape(package_name);
             // Find APK path on device
-            const pathResult = await runAdbCommand(`adb ${flag} shell pm path ${package_name}`, undefined, 15_000);
+            const pathResult = await runAdbCommand(`adb ${flag} shell pm path "${safePackageName}"`, undefined, 15_000);
             if (pathResult.exitCode !== 0 || !pathResult.stdout.includes("package:")) {
                 return {
                     content: [
@@ -417,7 +429,7 @@ export function registerAndroidTools(server) {
             const resolvedOutputDir = path.resolve(output_dir);
             await ensureDir(resolvedOutputDir);
             const localPath = path.join(resolvedOutputDir, fileName);
-            const pullResult = await runAdbCommand(`adb ${flag} pull "${remotePath}" "${localPath}"`, undefined, 60_000);
+            const pullResult = await runAdbCommand(`adb ${flag} pull "${shellEscape(remotePath)}" "${shellEscape(localPath)}"`, undefined, 60_000);
             if (pullResult.exitCode !== 0) {
                 return {
                     content: [
@@ -466,6 +478,20 @@ export function registerAndroidTools(server) {
             .describe("Timeout in seconds (default: 15)"),
     }, async ({ command, device_serial, timeout_seconds }) => {
         try {
+            // Security: Block extremely dangerous commands
+            const dangerousPatterns = [
+                /rm\s+-rf\s+\/\s*$/i, // rm -rf /
+                /mkfs\./i, // filesystem formatting
+                /dd\s+if=.*of=\/dev/i, // direct disk write
+            ];
+            if (dangerousPatterns.some((p) => p.test(command.trim()))) {
+                return {
+                    content: [{
+                            type: "text",
+                            text: `❌ Command blocked for safety: '${command}'. Potentially destructive operation detected.`,
+                        }],
+                };
+            }
             const adbCheck = await checkAdbAvailable();
             if (!adbCheck.available) {
                 return {

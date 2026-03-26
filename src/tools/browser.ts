@@ -99,11 +99,23 @@ const CLEANUP_OVERLAY_SCRIPT = `
 `;
 
 /**
+ * Escape string for safe use in JavaScript
+ */
+function escapeJsString(str: string): string {
+  return str
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/\t/g, '\\t');
+}
+
+/**
  * JavaScript click fallback
  */
 const JS_CLICK_SCRIPT = (selector: string) => `
 (function() {
-  const element = document.querySelector('${selector.replace(/'/g, "\\'")}');
+  const element = document.querySelector('${escapeJsString(selector)}');
   if (!element) return { success: false, error: 'Element not found' };
   
   // Try multiple click methods
@@ -177,7 +189,9 @@ async function evictOldestIdleSession(): Promise<string | null> {
 
   if (!oldestId) return null;
 
-  const evicted = sessions.get(oldestId)!;
+  const evicted = sessions.get(oldestId);
+  if (!evicted) return null; // Race condition: session already deleted
+  
   try {
     await evicted.browser.close();
   } catch {
@@ -192,11 +206,34 @@ async function evictOldestIdleSession(): Promise<string | null> {
 }
 
 // Auto-cleanup session yang idle
-setInterval(() => {
+setInterval(async () => {
   const now = Date.now();
+  const toDelete: string[] = [];
+  
   for (const [id, session] of sessions.entries()) {
     if (now - session.lastUsedAt.getTime() > SESSION_TTL_MS) {
-      session.browser.close().catch(() => null);
+      toDelete.push(id);
+    }
+  }
+  
+  // Close browsers and remove from map atomically
+  for (const id of toDelete) {
+    const session = sessions.get(id);
+    if (session) {
+      // Close browser with timeout to prevent hanging
+      const closeTimeout = setTimeout(() => {
+        process.stderr.write(`[browser] Force closing session ${id} after timeout\n`);
+      }, 5000);
+      
+      try {
+        await session.browser.close();
+      } catch (err) {
+        process.stderr.write(`[browser] Error closing session ${id}: ${err instanceof Error ? err.message : String(err)}\n`);
+      } finally {
+        clearTimeout(closeTimeout);
+      }
+      
+      session.pages.clear(); // Clear page references for GC
       sessions.delete(id);
       process.stderr.write(`[browser] Session ${id} expired and cleaned up\n`);
     }
@@ -214,6 +251,7 @@ export async function closeAllBrowserSessions(): Promise<void> {
     } catch {
       // Ignore — process may already be dead
     } finally {
+      session.pages.clear(); // Clear page references for GC
       sessions.delete(id);
     }
   });
@@ -225,7 +263,7 @@ function generateSessionId(): string {
   return `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-async function getSession(sessionId: string): Promise<BrowserSession | null> {
+function getSession(sessionId: string): BrowserSession | null {
   const session = sessions.get(sessionId);
   if (!session) return null;
   session.lastUsedAt = new Date();
@@ -289,9 +327,7 @@ export function registerBrowserTools(server: McpServer): void {
   // ── 1. browser_open ───────────────────────────────────────────────────────
   server.tool(
     "browser_open",
-    "Membuka browser baru dan navigasi ke URL. Membuat 'session' yang bisa " +
-      "dilanjutkan dengan tools browser lainnya. Kembalikan session_id yang " +
-      "harus disimpan untuk operasi selanjutnya. " +
+    "Buka browser baru dan navigasi ke URL. Simpan session_id untuk operasi selanjutnya." +
       "GUNAKAN INI PERTAMA KALI sebelum tools browser lainnya.",
     {
       url: z
@@ -347,19 +383,32 @@ export function registerBrowserTools(server: McpServer): void {
         };
         const vp = viewports[device];
 
-        let session: BrowserSession;
+        let session: BrowserSession | undefined;
 
-        // Reuse session jika ada
-        if (session_id && sessions.has(session_id)) {
-          session = sessions.get(session_id)!;
-          session.lastUsedAt = new Date();
-          const page = session.pages.get(session.activePageId)!;
+        // Reuse session jika ada (fix race condition: get once, check null)
+        if (session_id) {
+          const existingSession = sessions.get(session_id);
+          if (existingSession) {
+            session = existingSession;
+            session.lastUsedAt = new Date();
+            const page = session.pages.get(session.activePageId);
+            if (!page) {
+              return {
+                content: [{
+                  type: "text",
+                  text: `❌ Session '${session_id}' tidak memiliki active page.`,
+                }],
+              };
+            }
 
-          await page.goto(url, {
-            waitUntil: wait_until,
-            timeout: timeout_seconds * 1000,
-          });
-        } else {
+            await page.goto(url, {
+              waitUntil: wait_until,
+              timeout: timeout_seconds * 1000,
+            });
+          }
+        }
+        
+        if (!session) {
           // ── Session limit guard ──────────────────────────────────────────
           // Evict the longest-idle session if we are at capacity.
           if (sessions.size >= MAX_ACTIVE_SESSIONS) {
@@ -406,10 +455,14 @@ export function registerBrowserTools(server: McpServer): void {
 
           // Handle dialogs otomatis
           page.on("dialog", async (dialog) => {
-            process.stderr.write(
-              `[browser] Dialog: ${dialog.type()} — "${dialog.message()}"\n`
-            );
-            await dialog.accept();
+            try {
+              process.stderr.write(
+                `[browser] Dialog: ${dialog.type()} — "${dialog.message()}"\n`
+              );
+              await dialog.accept();
+            } catch (dialogError) {
+              process.stderr.write(`[browser] Dialog handle error: ${(dialogError as Error).message}\n`);
+            }
           });
 
           const newSessionId = session_id ?? generateSessionId();
@@ -434,8 +487,24 @@ export function registerBrowserTools(server: McpServer): void {
           });
         }
 
-        const activeSession = session_id ?? (session as BrowserSession & { _id?: string })._id!;
-        const page = session.pages.get(session.activePageId)!;
+        const activeSession = session_id ?? (session as BrowserSession & { _id?: string })._id;
+        if (!activeSession) {
+          return {
+            content: [{
+              type: "text",
+              text: "❌ Internal error: Session ID tidak ditemukan.",
+            }],
+          };
+        }
+        const page = session.pages.get(session.activePageId);
+        if (!page) {
+          return {
+            content: [{
+              type: "text",
+              text: `❌ Session '${activeSession}' tidak memiliki active page.`,
+            }],
+          };
+        }
         const pageInfo = await getPageInfo(page);
 
         let screenshotInfo = "";
@@ -582,9 +651,7 @@ export function registerBrowserTools(server: McpServer): void {
   // ── 3. browser_click ──────────────────────────────────────────────────────
   server.tool(
     "browser_click",
-    "Klik elemen di halaman menggunakan CSS selector. " +
-      "Otomatis scroll ke elemen, tunggu hingga clickable, lalu klik. " +
-      "Setelah klik, ambil screenshot untuk verifikasi. " +
+    "Klik elemen di halaman menggunakan CSS selector. Auto-scroll dan screenshot verifikasi." +
       "[STABILIZED v5.2] Mendukung auto-retry dan JavaScript fallback.",
     {
       session_id: z.string().describe("Session ID"),
@@ -911,7 +978,10 @@ export function registerBrowserTools(server: McpServer): void {
 
       try {
         const navigateOperation = async () => {
-          const page = sessionData!.pages.get(sessionData!.activePageId)!;
+          const page = sessionData?.pages.get(sessionData.activePageId);
+          if (!page) {
+            throw new Error(`Session '${session_id}' tidak memiliki active page.`);
+          }
 
           switch (action) {
             case "goto":
@@ -945,15 +1015,28 @@ export function registerBrowserTools(server: McpServer): void {
 
             case "new_tab": {
               if (!url) throw new Error("URL wajib untuk action 'new_tab'");
-              const newPage = await sessionData!.browser.newPage();
-              await newPage.setUserAgent(sessionData!.userAgent);
-              await newPage.goto(url, {
-                waitUntil: wait_until,
-                timeout: timeout_seconds * 1000,
-              });
-              const newPageId = `page_${sessionData!.pages.size + 1}`;
-              sessionData!.pages.set(newPageId, newPage);
-              sessionData!.activePageId = newPageId;
+              if (!sessionData) {
+                throw new Error("Session data tidak tersedia untuk new_tab.");
+              }
+              const newPage = await sessionData.browser.newPage();
+              let pageClosed = false;
+              try {
+                await newPage.setUserAgent(sessionData.userAgent);
+                await newPage.goto(url, {
+                  waitUntil: wait_until,
+                  timeout: timeout_seconds * 1000,
+                });
+                const newPageId = `page_${sessionData.pages.size + 1}`;
+                sessionData.pages.set(newPageId, newPage);
+                sessionData.activePageId = newPageId;
+              } catch (error) {
+                // Cleanup page on error to prevent memory leak
+                if (!pageClosed) {
+                  await newPage.close().catch(() => {});
+                  pageClosed = true;
+                }
+                throw error;
+              }
               break;
             }
           }
@@ -965,7 +1048,15 @@ export function registerBrowserTools(server: McpServer): void {
           operation: `navigate_${action}`
         });
 
-        const currentPage = sessionData.pages.get(sessionData.activePageId)!;
+        const currentPage = sessionData.pages.get(sessionData.activePageId);
+        if (!currentPage) {
+          return {
+            content: [{
+              type: "text",
+              text: `❌ Session '${session_id}' tidak memiliki active page setelah navigasi.`,
+            }],
+          };
+        }
         const pageInfo = await getPageInfo(currentPage);
 
         let ssInfo = "";
@@ -999,6 +1090,7 @@ export function registerBrowserTools(server: McpServer): void {
             
             // Tutup session yang bermasalah
             await sessionData.browser.close().catch(() => null);
+            sessionData.pages.clear(); // Clear page references for GC
             sessions.delete(session_id);
             
             // Buat session baru
@@ -1035,6 +1127,7 @@ export function registerBrowserTools(server: McpServer): void {
               userAgent,
             };
             sessions.set(newSessionId, newSession);
+            recreated = true; // Mark as recreated for response message
             
             const pageInfo = await getPageInfo(page);
             
@@ -1059,7 +1152,7 @@ export function registerBrowserTools(server: McpServer): void {
             };
           } catch (recoveryError) {
             return {
-              content: [{ type: "text", text: formatToolError("browser_navigate", error) }],
+              content: [{ type: "text", text: formatToolError("browser_navigate", recoveryError) }],
             };
           }
         }
@@ -1585,6 +1678,7 @@ export function registerBrowserTools(server: McpServer): void {
         }
 
         await session.browser.close();
+        session.pages.clear(); // Clear page references for GC
         sessions.delete(session_id);
 
         return {

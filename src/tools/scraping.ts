@@ -32,7 +32,8 @@ const STEALTH_USER_AGENTS = [
 ];
 
 function randomUA(): string {
-  return STEALTH_USER_AGENTS[Math.floor(Math.random() * STEALTH_USER_AGENTS.length)]!;
+  return STEALTH_USER_AGENTS[Math.floor(Math.random() * STEALTH_USER_AGENTS.length)] ??
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 }
 
 function randomDelay(min: number = 500, max: number = 2000): Promise<void> {
@@ -126,9 +127,7 @@ export function registerScrapingTools(server: McpServer): void {
   // ── 1. scrape_page_html ───────────────────────────────────────────────────
   server.tool(
     "scrape_page_html",
-    "Fetches a webpage using a headless Puppeteer browser and returns the fully " +
-      "rendered HTML (after JavaScript execution). Supports stealth mode to bypass " +
-      "basic bot detection. Waits for network idle before extracting content.",
+    "Fetch webpage dengan Puppeteer dan return rendered HTML. Support stealth mode.",
     {
       url: z.string().url().describe("Full URL to scrape (must include https://)"),
       wait_for: z
@@ -186,10 +185,13 @@ export function registerScrapingTools(server: McpServer): void {
           await page.evaluate(async () => {
             await new Promise<void>((resolve) => {
               let totalHeight = 0;
+              let iterations = 0;
+              const maxIterations = 100; // Max 10 seconds of scrolling
               const timer = setInterval(() => {
                 window.scrollBy(0, 300);
                 totalHeight += 300;
-                if (totalHeight >= document.body.scrollHeight) {
+                iterations++;
+                if (totalHeight >= document.body.scrollHeight || iterations >= maxIterations) {
                   clearInterval(timer);
                   resolve();
                 }
@@ -405,6 +407,24 @@ export function registerScrapingTools(server: McpServer): void {
           await page.waitForSelector(wait_for_selector, { timeout: timeout_seconds * 1000 });
         }
 
+        // Basic validation: check for potentially dangerous patterns
+        const dangerousPatterns = [
+          /eval\s*\(/i,
+          /Function\s*\(/i,
+          /setTimeout\s*\(\s*["'][^"']*["']/i,
+          /setInterval\s*\(\s*["'][^"']*["']/i,
+          /<script\b[^>]*>/i,
+        ];
+        const foundDangerous = dangerousPatterns.find((p) => p.test(js_code));
+        if (foundDangerous) {
+          return {
+            content: [{
+              type: "text",
+              text: `❌ Potentially dangerous JavaScript pattern detected. Code execution blocked for security.`,
+            }],
+          };
+        }
+        
         // Wrap in async function so user can use `return`
         const wrappedCode = `(async () => { ${js_code} })()`;
         const result = await page.evaluate(wrappedCode);
@@ -470,7 +490,7 @@ export function registerScrapingTools(server: McpServer): void {
 
         await page.setRequestInterception(true);
 
-        page.on("request", (req: any) => {
+        const requestHandler = (req: any) => {
           const rType = req.resourceType();
           if (filter_type === "all" || rType === filter_type) {
             capturedRequests.push({
@@ -480,11 +500,20 @@ export function registerScrapingTools(server: McpServer): void {
               headers: filter_type !== "all" ? req.headers() : undefined,
             });
           }
-          req.continue();
-        });
+          try {
+            req.continue();
+          } catch (e) {
+            // Request may have been handled already, ignore
+          }
+        };
+        page.on("request", requestHandler);
 
         await page.goto(url, { waitUntil: "networkidle2", timeout: timeout_seconds * 1000 });
         await randomDelay(1000, 2000);
+        
+        // Cleanup: remove listener and disable interception
+        page.off("request", requestHandler);
+        await page.setRequestInterception(false).catch(() => {});
 
         const summary =
           `🌐 Network Monitor: ${url}\n` +

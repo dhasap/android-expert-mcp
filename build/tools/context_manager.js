@@ -34,6 +34,10 @@ const MAX_SNAPSHOTS_PER_PROJECT = 20;
 const SNAPSHOT_MUTEX = new Mutex();
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 async function getSnapshotPath(name) {
+    // Security: Block path traversal attempts
+    if (name.includes("..") || name.includes("/") || name.includes("\\") || name.startsWith(".")) {
+        throw new Error(`Invalid project name '${name}': path separators and '..' not allowed`);
+    }
     await ensureDir(SNAPSHOT_DIR);
     const safe = name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
     return path.join(SNAPSHOT_DIR, `${safe}.json`);
@@ -287,34 +291,24 @@ function compactGeneric(text) {
 // ─── Tool registration ────────────────────────────────────────────────────────
 export function registerContextManagerTools(server) {
     // ── 1. context_save ───────────────────────────────────────────────────────
-    server.tool("context_save", "Simpan snapshot konteks sesi saat ini ke disk. " +
-        "Gunakan tool ini kapan saja saat progres kerja perlu diingat untuk sesi berikutnya — " +
-        "mirip 'checkpoint' atau 'save game'. " +
-        "Di sesi berikutnya, panggil context_load() dan AI langsung tahu konteks tanpa harus diceritakan ulang. " +
-        "Snapshot disimpan per 'project' sehingga beberapa proyek bisa ditrack terpisah.", {
+    server.tool("context_save", "Simpan snapshot konteks sesi ke disk. Gunakan context_load() di sesi berikutnya untuk melanjutkan.", {
         project: z
             .string()
-            .describe("Nama proyek atau identifier. Contoh: 'MyAndroidApp', 'tokopedia-scraper', 'vps-setup'. " +
-            "Dipakai sebagai nama file. Gunakan nama yang konsisten antar sesi."),
+            .describe("Nama proyek untuk file snapshot. Contoh: 'MyAndroidApp'"),
         summary: z
             .string()
-            .describe("Ringkasan LENGKAP state saat ini dalam 2-5 kalimat. " +
-            "Apa yang sedang dibangun? Di tahap mana? Ada masalah yang belum selesai? " +
-            "Tulis seperti memo untuk diri sendiri di sesi berikutnya."),
+            .describe("Ringkasan state saat ini. Apa yang sedang dikerjakan?"),
         current_task: z
             .string()
             .describe("Task yang sedang dikerjakan saat ini. Satu kalimat singkat."),
         next_steps: z
             .array(z.string())
             .min(1)
-            .describe("Langkah-langkah yang HARUS dilakukan di sesi berikutnya. " +
-            "Urutan penting — item pertama = hal pertama yang harus dikerjakan."),
+            .describe("Langkah berikutnya yang harus dikerjakan (urutan penting)."),
         context_data: z
             .record(z.unknown())
             .default({})
-            .describe("Data terstruktur bebas untuk disimpan. Contoh: " +
-            '{"package": "com.dhasap.app", "last_error": "...", "branch": "feature/login", ' +
-            '"files_modified": ["MainActivity.kt", "build.gradle"]}'),
+            .describe("Data tambahan bebas untuk disimpan (opsional)."),
         tags: z
             .array(z.string())
             .default([])
@@ -323,7 +317,7 @@ export function registerContextManagerTools(server) {
             .number()
             .int()
             .default(0)
-            .describe("Perkiraan jumlah pesan dalam sesi ini (opsional, untuk tracking kapan snapshot dibuat)."),
+            .describe("Jumlah pesan dalam sesi (opsional)."),
     }, async ({ project, summary, current_task, next_steps, context_data, tags, message_count }) => {
         try {
             const newSnapshot = {
@@ -603,6 +597,16 @@ export function registerContextManagerTools(server) {
                     content: [{ type: "text", text: "❌ Input teks kosong." }],
                 };
             }
+            // Security: Limit input size to prevent OOM (max 10MB)
+            const MAX_INPUT_SIZE = 10 * 1024 * 1024; // 10MB
+            if (text.length > MAX_INPUT_SIZE) {
+                return {
+                    content: [{
+                            type: "text",
+                            text: `❌ Input too large (${(text.length / 1024 / 1024).toFixed(2)}MB). Maximum allowed: 10MB.`,
+                        }],
+                };
+            }
             let compacted;
             switch (mode) {
                 case "build_log":
@@ -647,9 +651,10 @@ export function registerContextManagerTools(server) {
                 const raw = await fs.readFile(file_path, "utf-8");
                 text = raw;
             }
-            catch {
+            catch (err) {
+                const errorMsg = err instanceof Error ? err.message : String(err);
                 return {
-                    content: [{ type: "text", text: `❌ Tidak bisa membaca file: ${file_path}` }],
+                    content: [{ type: "text", text: `❌ Tidak bisa membaca file: ${file_path}\n   Error: ${errorMsg}` }],
                 };
             }
             const fileSizeKb = Buffer.byteLength(text, "utf-8") / 1024;

@@ -614,9 +614,7 @@ export function registerGithubTools(server: McpServer): void {
   // ── 5. github_file_write ────────────────────────────────────────────────
   server.tool(
     "github_file_write",
-    "Buat atau update satu file di repository GitHub (via GitHub API, tanpa git lokal). " +
-      "Jika file sudah ada, sertakan 'sha' dari github_file_read untuk update. " +
-      "Memerlukan GITHUB_TOKEN dengan scope 'repo'. " +
+    "Buat/update file di GitHub via API (tanpa git lokal). Butuh GITHUB_TOKEN." +
       "[STABILIZED v5.2] Dengan auto-retry untuk network failures.",
     {
       repo: z.string().describe("Nama repository"),
@@ -911,9 +909,7 @@ export function registerGithubTools(server: McpServer): void {
   // ── 9. github_commit_push ───────────────────────────────────────────────
   server.tool(
     "github_commit_push",
-    "Push beberapa file sekaligus dalam satu commit ke GitHub (tanpa git lokal). " +
-      "Menggunakan GitHub Tree API untuk efisiensi. " +
-      "Ideal untuk scaffolding proyek baru atau batch update file. " +
+    "Push beberapa file dalam satu commit ke GitHub via Tree API." +
       "[STABILIZED v5.2] Dengan auto-retry untuk network failures.",
     {
       repo: z.string().describe("Nama repository"),

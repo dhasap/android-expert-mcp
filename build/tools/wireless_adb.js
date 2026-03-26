@@ -343,10 +343,8 @@ export function registerWirelessAdbTools(server) {
             await runAdbCommand(`adb -s ${address} pull ${remotePath} "${localPath}"`, undefined, 15_000);
             // Cleanup remote
             await runAdbCommand(`adb -s ${address} shell rm ${remotePath}`, undefined, 5_000).catch(() => null);
-            // Verify local file exists and read for LLM
+            // Verify local file exists
             await fs.access(localPath);
-            const imageBuffer = await fs.readFile(localPath);
-            const base64Image = imageBuffer.toString('base64');
             return {
                 content: [
                     {
@@ -356,12 +354,8 @@ export function registerWirelessAdbTools(server) {
                             `Device  : ${address}\n` +
                             `Display : ${display_id}\n` +
                             `Saved   : ${localPath}\n\n` +
-                            `✅ Screenshot berhasil disimpan!`,
-                    },
-                    {
-                        type: "image",
-                        data: base64Image,
-                        mimeType: "image/png",
+                            `✅ Screenshot berhasil disimpan!\n` +
+                            `   Gunakan tool ReadMediaFile untuk melihat gambar.`,
                     },
                 ],
             };

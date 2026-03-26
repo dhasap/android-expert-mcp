@@ -69,6 +69,25 @@ async function makeHttpRequest(
 // Global mock servers storage
 const mockServers = new Map<string, { server: http.Server; port: number; routes: Map<string, any> }>();
 
+/**
+ * Close all active mock HTTP servers.
+ * Called during graceful shutdown to prevent hanging processes.
+ */
+export async function closeAllMockServers(): Promise<void> {
+  const closing = [...mockServers.entries()].map(async ([id, ms]) => {
+    try {
+      await new Promise<void>((resolve) => {
+        ms.server.close(() => resolve());
+      });
+    } catch {
+      // Ignore — server may already be closed
+    }
+  });
+  await Promise.allSettled(closing);
+  mockServers.clear();
+  process.stderr.write(`[advanced_testing] All mock servers closed (${closing.length} servers)\n`);
+}
+
 export function registerAdvancedTestingTools(server: McpServer): void {
   
   // ── 1. api_send_request ─────────────────────────────────────────────────
@@ -168,7 +187,9 @@ export function registerAdvancedTestingTools(server: McpServer): void {
             if (!mockServer) {
               lines.push(`❌ Server '${server_id}' not found`);
             } else {
-              mockServer.server.close();
+              await new Promise<void>((resolve) => {
+                mockServer.server.close(() => resolve());
+              });
               mockServers.delete(server_id);
               lines.push(`✅ Server '${server_id}' stopped`);
             }

@@ -35,6 +35,7 @@ import {
   ensureDir,
   truncateOutput,
   extractStackTrace,
+  shellEscape,
 } from "../utils.js";
 
 // ─── Konstanta IDX ────────────────────────────────────────────────────────────
@@ -148,8 +149,8 @@ async function findElementInUi(
     if (!match) return null;
 
     const [, clickable, x1, y1, x2, y2] = match;
-    const cx = Math.round((parseInt(x1!) + parseInt(x2!)) / 2);
-    const cy = Math.round((parseInt(y1!) + parseInt(y2!)) / 2);
+    const cx = Math.round((parseInt(x1 || "0") + parseInt(x2 || "0")) / 2);
+    const cy = Math.round((parseInt(y1 || "0") + parseInt(y2 || "0")) / 2);
     
     return {
       x: cx,
@@ -202,8 +203,8 @@ async function verifyElementAtCoords(
     if (!match) return false;
     
     const [, x1, y1, x2, y2] = match;
-    const centerX = Math.round((parseInt(x1!) + parseInt(x2!)) / 2);
-    const centerY = Math.round((parseInt(y1!) + parseInt(y2!)) / 2);
+    const centerX = Math.round((parseInt(x1 || "0") + parseInt(x2 || "0")) / 2);
+    const centerY = Math.round((parseInt(y1 || "0") + parseInt(y2 || "0")) / 2);
     
     // Allow 50px tolerance
     const tolerance = 50;
@@ -211,8 +212,10 @@ async function verifyElementAtCoords(
       Math.abs(centerX - x) <= tolerance &&
       Math.abs(centerY - y) <= tolerance
     );
-  } catch {
-    return true; // Assume OK if verification fails
+  } catch (err) {
+    // Log warning untuk debugging, tapi tetap lanjutkan
+    process.stderr.write(`[idx_firebase] UI verification warning: ${err instanceof Error ? err.message : String(err)}\n`);
+    return true; // Assume OK if verification fails (better UX than blocking)
   }
 }
 
@@ -353,7 +356,9 @@ async function smartInputText(
     // Type text with retry for long text
     const chunks = text.match(/.{1,100}/g) || [text]; // Split into 100-char chunks
     for (const chunk of chunks) {
-      const escaped = chunk.replace(/ /g, "%s").replace(/&/g, "\\&");
+      // Security: Proper shell escaping for adb input
+      const shellSafe = shellEscape(chunk);
+      const escaped = shellSafe.replace(/ /g, "%s");
       await withRetry(async () => {
         const result = await runAdbCommand(
           `adb ${flag} shell input text "${escaped}"`,
@@ -416,7 +421,7 @@ async function waitForTestLabOperation(
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 10000)); // poll tiap 10 detik
     const r = await runCommand(
-      `gcloud firebase test android operations describe ${operationId} --project ${projectId} --format=json`,
+      `gcloud firebase test android operations describe "${shellEscape(operationId)}" --project "${shellEscape(projectId)}" --format=json`,
       undefined,
       15000
     );
@@ -507,13 +512,24 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           lines.push("");
         }
 
+        // Security: Validate host format
+        if (!/^([a-zA-Z0-9][a-zA-Z0-9\-\.]*|\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.test(host)) {
+          return {
+            content: [{
+              type: "text",
+              text: `❌ Invalid host format: '${host}'. Must be valid hostname or IPv4.`,
+            }],
+          };
+        }
+        const safeHost = shellEscape(host);
+
         // Scan port TCP
         lines.push("🔌 Scanning port TCP...");
         for (const port of ports) {
-          const address = `${host}:${port}`;
+          const address = `${safeHost}:${port}`;
           // Cek apakah port terbuka
           const pingResult = await runCommand(
-            `nc -zv -w2 ${host} ${port} 2>&1 || echo "CLOSED"`,
+            `nc -zv -w2 "${safeHost}" ${port} 2>&1 || echo "CLOSED"`,
             undefined,
             5000
           );
@@ -524,8 +540,8 @@ export function registerIdxFirebaseTools(server: McpServer): void {
             pingResult.stderr.includes("succeeded");
 
           if (isOpen) {
-            found.push({ address, port, connected: false });
-            lines.push(`   ✅ Port ${port} TERBUKA → ${address}`);
+            found.push({ address: `${host}:${port}`, port, connected: false });
+            lines.push(`   ✅ Port ${port} TERBUKA → ${host}:${port}`);
           } else {
             lines.push(`   ⬜ Port ${port} tertutup`);
           }
@@ -1039,17 +1055,23 @@ export function registerIdxFirebaseTools(server: McpServer): void {
 
           if (launch_after && package_name) {
             lines.push("🚀 Launching aplikasi...");
-            const launchResult = await runAdbCommand(
-              `adb ${flag} shell monkey -p ${package_name} -c android.intent.category.LAUNCHER 1`,
-              undefined,
-              15000
-            );
-            if (launchResult.exitCode === 0) {
-              lines.push(`✅ Aplikasi ${package_name} dilaunched.`);
+            // Security: Validate and escape package name
+            if (!/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/.test(package_name)) {
+              lines.push(`❌ Invalid package name format: ${package_name}`);
             } else {
-              lines.push(
-                `⚠️  Launch gagal: ${launchResult.stderr.trim()}`
+              const safePackage = shellEscape(package_name);
+              const launchResult = await runAdbCommand(
+                `adb ${flag} shell monkey -p "${safePackage}" -c android.intent.category.LAUNCHER 1`,
+                undefined,
+                15000
               );
+              if (launchResult.exitCode === 0) {
+                lines.push(`✅ Aplikasi ${package_name} dilaunched.`);
+              } else {
+                lines.push(
+                  `⚠️  Launch gagal: ${launchResult.stderr.trim()}`
+                );
+              }
             }
           }
         }
@@ -1072,9 +1094,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
   // ── B1. ftl_run_test ──────────────────────────────────────────────────────
   server.tool(
     "ftl_run_test",
-    "Upload APK dan jalankan test di Firebase Test Lab. " +
-      "Mendukung Robo Test (otomatis, tanpa test code) dan " +
-      "Instrumentation Test (dengan Espresso/JUnit). " +
+    "Upload APK dan jalankan test di Firebase Test Lab. Support Robo Test dan Instrumentation Test." +
       "Membutuhkan gcloud CLI sudah login dan project dikonfigurasi.",
     {
       project_id: z
@@ -1198,13 +1218,13 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           "📤 Uploading dan menjalankan test...",
         ];
 
-        // Build gcloud command
+        // Build gcloud command with proper escaping
         const gcloudArgs = [
           `gcloud firebase test android run`,
-          `--project "${project_id}"`,
+          `--project "${shellEscape(project_id)}"`,
           `--type ${test_type}`,
           `--app "${resolvedApk}"`,
-          `--device model=${device_model},version=${android_version},locale=${locale},orientation=${orientation}`,
+          `--device model=${shellEscape(device_model)},version=${shellEscape(android_version)},locale=${shellEscape(locale)},orientation=${orientation}`,
           `--timeout ${timeout_minutes}m`,
           `--format=json`,
         ];
@@ -1218,14 +1238,17 @@ export function registerIdxFirebaseTools(server: McpServer): void {
             .split(",")
             .map((d) => {
               const [id, val] = d.trim().split(":");
-              return `--robo-directives text:${id}=${val}`;
+              // Security: Escape shell metacharacters
+              const safeId = id ? shellEscape(id) : "";
+              const safeVal = val ? shellEscape(val) : "";
+              return `--robo-directives text:${safeId}=${safeVal}`;
             })
             .join(" ");
           gcloudArgs.push(directives);
         }
 
         if (results_bucket) {
-          gcloudArgs.push(`--results-bucket "${results_bucket}"`);
+          gcloudArgs.push(`--results-bucket "${shellEscape(results_bucket)}"`);
         }
 
         const testResult = await runCommand(
@@ -1318,7 +1341,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         }
 
         const result = await runCommand(
-          `gcloud firebase test android models list --project "${project_id}" --format="table(id,name,supportedVersionIds,tags)"`,
+          `gcloud firebase test android models list --project "${shellEscape(project_id)}" --format="table(id,name,supportedVersionIds,tags)"`,
           undefined,
           30000
         );
@@ -1549,10 +1572,13 @@ export function registerIdxFirebaseTools(server: McpServer): void {
             message?: string;
           }> = [];
 
-          while ((match = testCasePattern.exec(content)) !== null) {
+          let testCount = 0;
+          const MAX_TEST_CASES = 10000; // Safety limit
+          while ((match = testCasePattern.exec(content)) !== null && testCount < MAX_TEST_CASES) {
             const [, name, className, time, body] = match;
             let status: "pass" | "fail" | "skip" = "pass";
             let message: string | undefined;
+            testCount++;
 
             if (body?.includes("<failure")) {
               status = "fail";
@@ -1814,10 +1840,6 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           const stat = await fs.stat(localPath);
           const sizeKb = (stat.size / 1024).toFixed(1);
 
-          // Read the PNG file and encode as base64 for LLM
-          const imageBuffer = await fs.readFile(localPath);
-          const base64Image = imageBuffer.toString('base64');
-
           return {
             content: [
               {
@@ -1827,12 +1849,9 @@ export function registerIdxFirebaseTools(server: McpServer): void {
                   "─".repeat(55) +
                   `\nDevice : ${device_serial ?? devices[0]?.serial ?? "default"}` +
                   `\nSaved  : ${localPath}` +
-                  `\nSize   : ${sizeKb} KB`,
-              },
-              {
-                type: "image",
-                data: base64Image,
-                mimeType: "image/png",
+                  `\nSize   : ${sizeKb} KB\n\n` +
+                  `💡 Screenshot tersimpan di: ${localPath}\n` +
+                  `   Gunakan tool ReadMediaFile untuk melihat gambar.`,
               },
             ],
           };
@@ -1879,7 +1898,9 @@ export function registerIdxFirebaseTools(server: McpServer): void {
             }> = [];
             
             let match;
-            while ((match = nodePattern.exec(xmlContent)) !== null) {
+            let nodeCount = 0;
+            const MAX_NODES = 5000; // Safety limit to prevent OOM/hang
+            while ((match = nodePattern.exec(xmlContent)) !== null && nodeCount < MAX_NODES) {
               const [, cls, resourceId, text, contentDesc, clickable, enabled, x1, y1, x2, y2] = match;
               const isInput = (cls?.includes("EditText") || cls?.includes("Input") || cls?.includes("TextField")) ?? false;
               
@@ -1893,6 +1914,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
                 bounds: `[${x1},${y1}][${x2},${y2}]`,
                 isInput,
               });
+              nodeCount++;
             }
             
             const interactiveNodes = nodes.filter(n => n.clickable && n.enabled);
@@ -2089,7 +2111,9 @@ export function registerIdxFirebaseTools(server: McpServer): void {
         }> = [];
 
         let match;
-        while ((match = nodePattern.exec(xmlContent)) !== null) {
+        let nodeCount = 0;
+        const MAX_NODES = 5000; // Safety limit to prevent OOM/hang
+        while ((match = nodePattern.exec(xmlContent)) !== null && nodeCount < MAX_NODES) {
           const [
             ,
             cls,
@@ -2113,6 +2137,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
           if (package_filter && resourceId && !resourceId.startsWith(package_filter)) {
             continue;
           }
+          nodeCount++;
 
           const isInput =
             (cls?.includes("EditText") ||
@@ -2239,9 +2264,7 @@ export function registerIdxFirebaseTools(server: McpServer): void {
   // v5.2: Stabilized with retry, verification, and smart waiting
   server.tool(
     "emulator_tap",
-    "Tap/klik koordinat atau elemen UI di emulator via ADB input. " +
-      "STABILIZED v5.2: Auto-retry, element verification, smart swipe velocity. " +
-      "Bisa tap by koordinat X,Y atau by resource-id/text dari UI dump.",
+    "Tap/klik elemen UI di emulator via ADB. Support tap by koordinat, text, atau resource-id.",
     {
       device_serial: z.string().optional().describe("Serial emulator"),
       action: z
@@ -2416,9 +2439,6 @@ export function registerIdxFirebaseTools(server: McpServer): void {
             );
             ssInfo = `\n📸 Screenshot: ${ssPath}`;
             
-            // Read and encode the screenshot
-            const imageBuffer = await fs.readFile(ssPath);
-            base64Image = imageBuffer.toString('base64');
           } catch {
             ssInfo = "\n📸 Screenshot: (gagal)";
           }
@@ -2426,30 +2446,6 @@ export function registerIdxFirebaseTools(server: McpServer): void {
 
         const statusIcon = result.success ? "✅" : "❌";
         const attemptsInfo = result.attempts ? ` (retry: ${result.attempts}x)` : "";
-
-        // Add image content if screenshot was successful
-        if (base64Image) {
-          return {
-            content: [
-              {
-                type: "text",
-                text:
-                  `${statusIcon} ${action}${attemptsInfo}\n` +
-                  "─".repeat(55) +
-                  (tapX !== undefined ? `\nKoord   : (${tapX}, ${tapY})` : "") +
-                  (text ? `\nTarget  : "${text}"` : "") +
-                  (resource_id ? `\nID      : ${resource_id}` : "") +
-                  `\nStatus  : ${result.message}` +
-                  ssInfo,
-              },
-              {
-                type: "image",
-                data: base64Image,
-                mimeType: "image/png",
-              },
-            ],
-          };
-        }
 
         return {
           content: [
@@ -2608,29 +2604,12 @@ export function registerIdxFirebaseTools(server: McpServer): void {
             );
             ssInfo = `\n📸 Screenshot: ${ssPath}`;
             
-            // Read and encode the screenshot
-            const imageBuffer = await fs.readFile(ssPath);
-            base64Image = imageBuffer.toString('base64');
           } catch {
             ssInfo = "\n📸 Screenshot: (gagal)";
           }
         }
 
         lines.push(ssInfo);
-        
-        // Add image content if screenshot was successful
-        if (base64Image) {
-          return {
-            content: [
-              { type: "text", text: lines.join("\n") },
-              {
-                type: "image",
-                data: base64Image,
-                mimeType: "image/png",
-              },
-            ],
-          };
-        }
         
         return {
           content: [{ type: "text", text: lines.join("\n") }],

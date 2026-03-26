@@ -2,6 +2,36 @@
 
 ---
 
+## [5.3.0] — Security Hardening & Documentation
+
+### 🔒 Security Improvements
+
+| Component | Fix | Severity |
+|-----------|-----|----------|
+| VPS Tools | Command injection via `profile.name`, `host`, `user` | 🔴 High |
+| VPS Tools | Path traversal via `local_path` | 🟡 Medium |
+| Browser Tools | Non-null assertions, race conditions | 🟡 Medium |
+| Scraping Tools | Infinite scroll timer, event listener leak | 🟡 Medium |
+| Android Tools | Command injection via `gradlew`, `package_name` | 🔴 High |
+| Context Manager | Path traversal, input size limit | 🟡 Medium |
+| IDX Firebase | Host validation, gcloud parameter escaping | 🔴 High |
+
+### 📚 Documentation Reorganization
+
+- Moved all documentation to `docs/` folder
+- Created structured guides for common use cases
+- Removed obsolete bug report files
+- Updated README.md with cleaner structure
+
+### 🔧 New Utilities
+
+- `shellEscape()` — Comprehensive shell escaping for all user inputs
+- `isValidHost()` — IPv4 and hostname validation
+- `isValidUsername()` — POSIX username validation
+- `isValidPort()` — Port number validation
+
+---
+
 ## [5.2.0] — Browser & GitHub Stability STABILIZED v5.2
 
 ### 🆕 Browser Stability Improvements

@@ -1,0 +1,111 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# .idx/dev.nix — Flutter + Firebase Emulator + MCP
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Template untuk Flutter development dengan:
+#   1. Flutter SDK
+#   2. Firebase Emulator Suite
+#   3. MCP Server untuk automation
+#
+# CARA PAKAI:
+#   1. Copy file ini ke .idx/dev.nix di root project
+#   2. Di IDX: klik "Rebuild Environment"
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+{ pkgs, ... }: {
+
+  channel = "stable-25.05";
+
+  # ── Packages ────────────────────────────────────────────────────────────────
+  packages = [
+    # Flutter SDK
+    pkgs.flutter
+
+    # Android SDK
+    pkgs.android-tools
+
+    # Java 17
+    pkgs.jdk17
+
+    # Node.js untuk MCP Server
+    pkgs.nodejs_20
+
+    # Firebase CLI
+    pkgs.nodePackages.firebase-tools
+
+    # Chromium untuk Puppeteer
+    pkgs.chromium
+
+    # SSH & VPS Tools
+    pkgs.openssh
+    pkgs.sshpass
+    pkgs.rsync
+
+    # Tools
+    pkgs.git
+    pkgs.curl
+  ];
+
+  # ── Environment ─────────────────────────────────────────────────────────────
+  env = {
+    JAVA_HOME = "${pkgs.jdk17}";
+    FLUTTER_ROOT = "${pkgs.flutter}";
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD = "true";
+    PUPPETEER_EXECUTABLE_PATH = "${pkgs.chromium}/bin/chromium";
+    HOST = "0.0.0.0";
+    SSH_CONFIG_DIR = "$HOME/.ssh";
+  };
+
+  # ── IDX config ───────────────────────────────────────────────────────────────
+  idx = {
+    extensions = [
+      "Dart-Code.flutter"
+      "Dart-Code.dart-code"
+    ];
+
+    previews = {
+      enable = true;
+      previews = {
+        web = {
+          command = [ "flutter" "run" "--machine" "-d" "web-server" "--web-hostname" "0.0.0.0" "--web-port" "$PORT" ];
+          manager = "flutter";
+        };
+        android = {
+          command = [
+            "bash" "-c"
+            ''
+              flutter emulators --launch Pixel_3a_API_34 || true
+              flutter run -d emulator
+            ''
+          ];
+          manager = "flutter";
+        };
+      };
+    };
+
+    workspace = {
+      onCreate = {
+        flutter-doctor = "flutter doctor";
+        setup-dirs = "mkdir -p /tmp/mcp-screenshots ~/.ssh";
+      };
+
+      onStart = {
+        info = ''
+          echo "════════════════════════════════════════════════════════════"
+          echo "  🚀 Flutter + Firebase + MCP Workspace"
+          echo "════════════════════════════════════════════════════════════"
+          echo ""
+          echo "  📱 Flutter : flutter run"
+          echo "  🔥 Firebase: firebase emulators:start"
+          echo "  🧪 Test    : flutter test"
+          echo ""
+          echo "  MCP Tools:"
+          echo "    • Web Scraping"
+          echo "    • VPS Deploy"
+          echo "════════════════════════════════════════════════════════════"
+        '';
+      };
+    };
+  };
+}

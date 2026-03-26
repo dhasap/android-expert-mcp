@@ -107,12 +107,69 @@ async function readStore(): Promise<VpsStore> {
  *
  * Remote execution: `echo <b64> | base64 -d | bash`
  */
+/**
+ * Escape a string for safe use in shell double quotes.
+ * Handles $, `, ", \, and ! (for bash history expansion).
+ */
+/**
+ * Comprehensive shell escape for use in double-quoted contexts.
+ * Handles all special characters that could cause injection.
+ */
+function shellEscape(str: string): string {
+  if (!str) return str;
+  return str
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, "\\\"")
+    .replace(/\$/g, "\\$")
+    .replace(/`/g, "\\`")
+    .replace(/!/g, "\\!")
+    .replace(/\n/g, "\\n")  // Prevent newline injection
+    .replace(/\r/g, "\\r");
+}
+
+/**
+ * Strict validation for IP address or hostname
+ */
+function isValidHost(host: string): boolean {
+  // IPv4 regex
+  const ipv4Regex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
+  // Hostname regex (simplified)
+  const hostnameRegex = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+  return ipv4Regex.test(host) || hostnameRegex.test(host);
+}
+
+/**
+ * Validate POSIX username
+ */
+function isValidUsername(user: string): boolean {
+  // POSIX: start with letter or underscore, then alphanumeric/underscore/hyphen
+  return /^[a-z_]([a-z0-9_-]{0,31})$/i.test(user);
+}
+
+/**
+ * Validate port number
+ */
+function isValidPort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
 function buildSshCmd(
   profile: ServerProfile,
   remoteCmd: string,
 ): string {
+  // Validate profile data
+  if (!isValidHost(profile.host)) {
+    throw new Error(`Invalid host in profile: ${profile.host}`);
+  }
+  if (!isValidPort(profile.port)) {
+    throw new Error(`Invalid port in profile: ${profile.port}`);
+  }
+
   const b64 = Buffer.from(remoteCmd, "utf-8").toString("base64");
-  const keyFlag = profile.identity_file ? `-i "${profile.identity_file}"` : "";
+  const safeIdentity = profile.identity_file ? shellEscape(profile.identity_file) : "";
+  const safeUser = shellEscape(profile.user);
+  const safeHost = shellEscape(profile.host);
+  const keyFlag = safeIdentity ? `-i "${safeIdentity}"` : "";
   const opts = [
     "-o StrictHostKeyChecking=no",
     "-o ConnectTimeout=15",
@@ -121,7 +178,8 @@ function buildSshCmd(
   ].filter(Boolean).join(" ");
 
   // `base64 -d` is available on both GNU/Linux (Debian/Ubuntu) and macOS.
-  return `ssh ${opts} -p ${profile.port} ${profile.user}@${profile.host} 'echo ${b64} | base64 -d | bash'`;
+  // IMPORTANT: Quote the user@host to prevent injection
+  return `ssh ${opts} -p ${profile.port} "${safeUser}@${safeHost}" 'echo ${b64} | base64 -d | bash'`;
 }
 
 function buildScpCmd(
@@ -130,7 +188,20 @@ function buildScpCmd(
   remotePath: string,
   recursive = false
 ): string {
-  const keyFlag = profile.identity_file ? `-i "${profile.identity_file}"` : "";
+  // Validate profile data
+  if (!isValidHost(profile.host)) {
+    throw new Error(`Invalid host in profile: ${profile.host}`);
+  }
+  if (!isValidPort(profile.port)) {
+    throw new Error(`Invalid port in profile: ${profile.port}`);
+  }
+
+  const safeIdentity = profile.identity_file ? shellEscape(profile.identity_file) : "";
+  const safeUser = shellEscape(profile.user);
+  const safeHost = shellEscape(profile.host);
+  const safeLocalPath = shellEscape(localPath);
+  const safeRemotePath = shellEscape(remotePath);
+  const keyFlag = safeIdentity ? `-i "${safeIdentity}"` : "";
   const opts = [
     "-o StrictHostKeyChecking=no",
     "-o ConnectTimeout=15",
@@ -138,7 +209,8 @@ function buildScpCmd(
     recursive ? "-r" : "",
   ].filter(Boolean).join(" ");
 
-  return `scp ${opts} -P ${profile.port} "${localPath}" ${profile.user}@${profile.host}:"${remotePath}"`;
+  // IMPORTANT: Quote the user@host and paths to prevent injection
+  return `scp ${opts} -P ${profile.port} "${safeLocalPath}" "${safeUser}@${safeHost}":"${safeRemotePath}"`;
 }
 
 // ─── Resource Parser ─────────────────────────────────────────────────────────
@@ -161,17 +233,285 @@ function parseResourceWarnings(
 
 export function registerVpsTools(server: McpServer): void {
 
-  // ── 1. vps_add_server ────────────────────────────────────────────────────
+  // ── 0. vps_quick_exec ────────────────────────────────────────────────────
+  // TOOL BARU: Super simple, tinggal kirim host,user,password,command langsung jalan
+  // AUTO-SAVE: Setelah sukses, bisa save profile untuk digunakan nanti
+  server.tool(
+    "vps_quick_exec",
+    "Jalankan command SSH langsung dengan password. Auto-save profile setelah sukses. " +
+      "Cara paling cepat: kirim host,user,password,command → jalan → auto-save untuk sessi berikutnya.",
+    {
+      host: z.string().describe("IP atau hostname VPS, contoh: '47.123.45.67'"),
+      user: z.string().min(1).max(32).regex(/^[a-z_][a-z0-9_-]*$/i).default("root").describe("SSH username, default: root"),
+      password: z.string().min(1).describe("Password SSH (tidak disimpan permanen, hanya sementara)"),
+      command: z.string().min(1).describe("Command yang mau dijalankan, contoh: 'uptime' atau 'ls -la'"),
+      save_as: z.string().min(1).max(50).regex(/^[a-zA-Z0-9_-]+$/).optional().describe("Nama untuk save profile (opsional). Contoh: 'vps-prod'. Kalau tidak diisi, tidak disimpan."),
+      port: z.number().int().min(1).max(65535).default(22).describe("SSH port, default: 22"),
+      timeout_seconds: z.number().int().min(5).max(120).default(30),
+    },
+    async ({ host, user, password, command, save_as, port, timeout_seconds }) => {
+      try {
+        // VALIDATE INPUTS FIRST
+        if (!isValidHost(host)) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `❌ Invalid host: '${host}'. Must be valid IPv4 or hostname.`,
+            }],
+          };
+        }
+        
+        if (!isValidUsername(user)) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `❌ Invalid username: '${user}'. Must be valid POSIX username (letters, numbers, underscore, hyphen).`,
+            }],
+          };
+        }
+        
+        if (!isValidPort(port)) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `❌ Invalid port: ${port}. Must be between 1-65535.`,
+            }],
+          };
+        }
+        
+        // Validate save_as if provided
+        if (save_as && !/^[a-zA-Z0-9_-]{1,50}$/.test(save_as)) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `❌ Invalid save_as: '${save_as}'. Must be 1-50 alphanumeric characters, hyphen, or underscore.`,
+            }],
+          };
+        }
+
+        // Cek sshpass tersedia
+        const sshpassCheck = await runCommand("which sshpass", undefined, 5000);
+        const hasSshpass = sshpassCheck.exitCode === 0;
+
+        if (!hasSshpass) {
+          return {
+            content: [{
+              type: "text" as const,
+              text:
+                `❌ sshpass tidak terinstall di environment ini.\n\n` +
+                `💡 Install: sudo apt-get install -y sshpass`,
+            }],
+          };
+        }
+
+        // Build SSH command dengan PROPER ESCAPING
+        const safeHost = shellEscape(host);
+        const safeUser = shellEscape(user);
+        const safePassword = password.replace(/'/g, "'\\''");
+        const safePort = port; // Already validated as number
+        const b64 = Buffer.from(command, "utf-8").toString("base64");
+        const sshCmd = `sshpass -p '${safePassword}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p ${safePort} "${safeUser}@${safeHost}" 'echo ${b64} | base64 -d | bash'`;
+
+        const result = await runCommand(sshCmd, undefined, timeout_seconds * 1000);
+
+        // Mask password dari output
+        const maskedOutput = maskSecrets(result.stdout + result.stderr, [password]);
+
+        // Jika sukses dan user minta save, simpan profile (tanpa password!)
+        let savedMessage = "";
+        if (result.exitCode === 0 && save_as) {
+          await withStore(async (store) => {
+            const existing = store.servers.find((s) => s.name === save_as);
+            if (existing) {
+              existing.host = host;
+              existing.port = port;
+              existing.user = user;
+              existing.last_used = new Date().toISOString();
+            } else {
+              const profile: ServerProfile = {
+                id: crypto.randomUUID().slice(0, 8),
+                name: save_as,
+                host,
+                port,
+                user,
+                tags: ["quick-saved"],
+                added_at: new Date().toISOString(),
+                last_used: new Date().toISOString(),
+              };
+              store.servers.push(profile);
+            }
+          });
+          savedMessage = `\n\n💾 Profile tersimpan sebagai "${save_as}"!\n   Untuk pakai lagi: vps_quick_exec(host="${host}", user="${user}", password="...", command="...")\n   Atau setup SSH key: vps_setup_key(server="${save_as}")`;
+        }
+
+        if (result.exitCode === 0) {
+          return {
+            content: [{
+              type: "text" as const,
+              text:
+                `✅ Command berhasil dijalankan di ${user}@${host}\n` +
+                `${"─".repeat(50)}\n` +
+                maskedOutput +
+                savedMessage,
+            }],
+          };
+        } else {
+          return {
+            content: [{
+              type: "text" as const,
+              text:
+                `❌ Command gagal (exit code ${result.exitCode})\n` +
+                `${"─".repeat(50)}\n` +
+                maskedOutput,
+            }],
+          };
+        }
+      } catch (error) {
+        return { content: [{ type: "text", text: formatSecureToolError("vps_quick_exec", error, [password]) }] };
+      }
+    }
+  );
+
+  // ── 1. vps_setup_key ────────────────────────────────────────────────────
+  // Setup SSH key otomatis untuk migrasi dari password ke key-based auth
+  server.tool(
+    "vps_setup_key",
+    "Setup SSH key authentication untuk VPS. Auto-generate key jika belum ada, auto-copy ke VPS. " +
+      "Migrasi dari password (tidak aman) ke SSH key (aman).",
+    {
+      server: z.string().describe("Nama server dari vps_list_servers"),
+      password: z.string().describe("Password SSH saat ini (untuk copy key ke VPS)"),
+      key_type: z.enum(["ed25519", "rsa"]).default("ed25519").describe("Tipe key: ed25519 (modern) atau rsa (compatible)"),
+    },
+    async ({ server: serverName, password, key_type }) => {
+      try {
+        const store = await readStore();
+        const profile = store.servers.find((s) => s.name === serverName || s.id === serverName);
+        
+        if (!profile) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `❌ Server '${serverName}' tidak ditemukan. Gunakan vps_add_server atau vps_quick_exec dulu.`,
+            }],
+          };
+        }
+
+        const keyPath = path.join(os.homedir(), ".ssh", `id_${key_type}_${profile.id}`);
+        const pubPath = `${keyPath}.pub`;
+
+        // Cek atau generate key
+        let keyExists = false;
+        try {
+          await runCommand(`test -f "${keyPath}"`, undefined, 3000);
+          keyExists = true;
+        } catch {
+          keyExists = false;
+        }
+
+        if (!keyExists) {
+          // Generate key baru
+          await runCommand(`mkdir -p ~/.ssh && chmod 700 ~/.ssh`, undefined, 5000);
+          // FIX: Escape profile.name to prevent command injection
+          const safeProfileName = shellEscape(profile.name);
+          const safeKeyPath = shellEscape(keyPath);
+          const keygenCmd = key_type === "ed25519" 
+            ? `ssh-keygen -t ed25519 -C "mcp-${safeProfileName}" -f "${safeKeyPath}" -N ""`
+            : `ssh-keygen -t rsa -b 4096 -C "mcp-${safeProfileName}" -f "${safeKeyPath}" -N ""`;
+          await runCommand(keygenCmd, undefined, 10000);
+        }
+
+        // Validate profile before using
+        if (!isValidHost(profile.host)) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `❌ Invalid host in profile: '${profile.host}'`,
+            }],
+          };
+        }
+        if (!isValidPort(profile.port)) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `❌ Invalid port in profile: ${profile.port}`,
+            }],
+          };
+        }
+
+        // Copy key ke VPS pakai sshpass
+        const safePassword = password.replace(/'/g, "'\\''");
+        const safeHost = shellEscape(profile.host);
+        const safeUser = shellEscape(profile.user);
+        const safePort = profile.port;
+        
+        // Setup .ssh di remote dan copy key
+        const setupCmd = `sshpass -p '${safePassword}' ssh -o StrictHostKeyChecking=no -p ${safePort} "${safeUser}@${safeHost}" "mkdir -p ~/.ssh && chmod 700 ~/.ssh"`;
+        const setupResult = await runCommand(setupCmd, undefined, 15000);
+        
+        if (setupResult.exitCode !== 0) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `❌ Gagal setup .ssh di remote: ${setupResult.stderr}`,
+            }],
+          };
+        }
+
+        // Copy public key
+        const copyCmd = `sshpass -p '${safePassword}' scp -o StrictHostKeyChecking=no -P ${safePort} "${pubPath}" "${safeUser}@${safeHost}":/tmp/key.pub`;
+        await runCommand(copyCmd, undefined, 15000);
+
+        // Append ke authorized_keys
+        const authCmd = `sshpass -p '${safePassword}' ssh -o StrictHostKeyChecking=no -p ${safePort} "${safeUser}@${safeHost}" "cat /tmp/key.pub >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && rm /tmp/key.pub"`;
+        const authResult = await runCommand(authCmd, undefined, 15000);
+
+        if (authResult.exitCode !== 0) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `❌ Gagal setup authorized_keys: ${authResult.stderr}`,
+            }],
+          };
+        }
+
+        // Update profile dengan identity_file
+        await withStore(async (store) => {
+          const p = store.servers.find((s) => s.id === profile.id);
+          if (p) {
+            p.identity_file = keyPath;
+            p.tags = [...new Set([...p.tags, "ssh-key"])];
+          }
+        });
+
+        return {
+          content: [{
+            type: "text" as const,
+            text:
+              `✅ SSH Key setup berhasil untuk ${serverName}!\n` +
+              `${"─".repeat(50)}\n` +
+              `Key file: ${keyPath}\n` +
+              `Profile updated: sekarang pakai SSH key (lebih aman)\n\n` +
+              `💡 Selanjutnya pakai vps_exec(server="${serverName}", command="...") tanpa password!`,
+          }],
+        };
+      } catch (error) {
+        return { content: [{ type: "text", text: formatSecureToolError("vps_setup_key", error, [password]) }] };
+      }
+    }
+  );
+
+  // ── 2. vps_add_server ────────────────────────────────────────────────────
   server.tool(
     "vps_add_server",
     "Simpan profil koneksi server VPS. " +
       "Profil disimpan lokal di ~/.android-expert-mcp/vps_store.json. " +
       "Gunakan identity_file (SSH key) — lebih aman dari password.",
     {
-      name: z.string().describe("Nama alias server, misal 'alibaba-prod' atau 'vps-bot'"),
-      host: z.string().describe("IP atau hostname VPS, misal '47.123.xxx.xxx'"),
+      name: z.string().min(1).max(50).regex(/^[a-zA-Z0-9_-]+$/, "Name must be alphanumeric, underscore, or hyphen only").describe("Nama alias server, misal 'alibaba-prod' atau 'vps-bot'"),
+      host: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9\-\.]*$|^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/, "Must be valid IPv4 or hostname").describe("IP atau hostname VPS, misal '47.123.xxx.xxx'"),
       port: z.number().int().min(1).max(65535).default(22),
-      user: z.string().default("root").describe("SSH username"),
+      user: z.string().min(1).max(32).regex(/^[a-z_][a-z0-9_-]*$/i, "Invalid POSIX username").default("root").describe("SSH username"),
       identity_file: z
         .string()
         .optional()
@@ -282,11 +622,12 @@ export function registerVpsTools(server: McpServer): void {
       "Gunakan ini untuk operasi apapun di server: install package, " +
       "cek file, restart service, dll.",
     {
-      server: z.string().describe("Nama atau ID server dari vps_list_servers"),
-      command: z.string().describe("Command yang dijalankan di server remote"),
+      server: z.string().min(1).max(100).describe("Nama atau ID server dari vps_list_servers"),
+      command: z.string().min(1).max(10000).describe("Command yang dijalankan di server remote"),
       timeout_seconds: z.number().int().min(5).max(300).default(30),
       working_dir: z
         .string()
+        .max(500)
         .optional()
         .describe("Working directory di server, misal '/var/www/myapp'"),
     },
@@ -307,18 +648,36 @@ export function registerVpsTools(server: McpServer): void {
           };
         }
 
-        const fullCmd = working_dir
-          ? `cd "${working_dir}" && ${command}`
+        // Validate working_dir if provided
+        if (working_dir && !/^\/[a-zA-Z0-9_\-\.\/]+$/.test(working_dir)) {
+          return {
+            content: [{
+              type: "text",
+              text: `❌ Invalid working_dir: '${working_dir}'. Must be absolute path with only alphanumeric, hyphen, underscore, dot, slash.`,
+            }],
+          };
+        }
+
+        const safeWorkingDir = working_dir ? shellEscape(working_dir) : "";
+        const fullCmd = safeWorkingDir
+          ? `cd "${safeWorkingDir}" && ${command}`
           : command;
 
         const sshCmd = buildSshCmd(profile, fullCmd);
         const result = await runCommand(sshCmd, undefined, timeout_seconds * 1000);
 
-        // Update last_used atomically (fire-and-forget style, non-blocking)
-        withStore(async (s) => {
-          const p = s.servers.find((x) => x.id === profile.id);
-          if (p) p.last_used = new Date().toISOString();
-        }).catch(() => { /* non-critical */ });
+        // Update last_used atomically - FIXED: properly await or handle silently
+        // This is fire-and-forget intentionally for performance, but we catch properly
+        (async () => {
+          try {
+            await withStore(async (s) => {
+              const p = s.servers.find((x) => x.id === profile.id);
+              if (p) p.last_used = new Date().toISOString();
+            });
+          } catch {
+            /* non-critical, don't fail the command */
+          }
+        })();
 
         const output = (result.stdout + (result.stderr ? "\n[stderr]\n" + result.stderr : "")).trim();
 
@@ -414,7 +773,8 @@ export function registerVpsTools(server: McpServer): void {
           const total = parseInt(memMatch[1]);
           const used = parseInt(memMatch[2]);
           const free = parseInt(memMatch[3]);
-          const pct = (used / total * 100);
+          // Guard against division by zero
+          const pct = total > 0 ? (used / total * 100) : 0;
           const filled = Math.round(pct / 5);
           const bar = "█".repeat(filled) + "░".repeat(20 - filled);
           lines.push(
@@ -481,9 +841,7 @@ export function registerVpsTools(server: McpServer): void {
   // ── 5. vps_deploy ────────────────────────────────────────────────────────
   server.tool(
     "vps_deploy",
-    "Deploy project ke VPS via SCP + SSH. " +
-      "Upload file/folder, jalankan install commands, restart service. " +
-      "Support deploy bot Telegram, Node.js API, atau file statis.",
+    "Deploy project ke VPS via SCP + SSH. Support bot Telegram, Node.js API, file statis.",
     {
       server: z.string().describe("Nama atau ID server"),
       local_path: z.string().describe("Path lokal yang di-upload (file atau folder)"),
@@ -520,6 +878,27 @@ export function registerVpsTools(server: McpServer): void {
         }
 
         const resolvedLocal = path.resolve(local_path);
+        
+        // FIX: Validate local_path to prevent path traversal
+        if (!resolvedLocal.startsWith(process.cwd()) && !resolvedLocal.startsWith(os.homedir())) {
+          return {
+            content: [{
+              type: "text",
+              text: `❌ local_path '${local_path}' is outside allowed directories.\nMust be within:\n  - Current directory: ${process.cwd()}\n  - Home directory: ${os.homedir()}`,
+            }],
+          };
+        }
+        
+        // FIX: Validate remote_path must be absolute
+        if (!remote_path.startsWith('/')) {
+          return {
+            content: [{
+              type: "text",
+              text: `❌ remote_path '${remote_path}' must be an absolute path starting with /`,
+            }],
+          };
+        }
+        
         const lines: string[] = [
           `🚀 Deploying ke ${profile.name}`,
           "═".repeat(55),
@@ -549,27 +928,37 @@ export function registerVpsTools(server: McpServer): void {
         }
 
         // 2. Ensure remote dir exists
+        const safeRemotePath = shellEscape(remote_path);
         await runCommand(
-          buildSshCmd(profile, `mkdir -p "${remote_path}"`),
+          buildSshCmd(profile, `mkdir -p "${safeRemotePath}"`),
           undefined, 15000
         );
 
         // 3. Upload via rsync (preferred) atau scp fallback
         lines.push("📤 Uploading files...");
 
-        const excludeFlags = exclude_patterns
-          .map((p) => `--exclude="${p}"`)
+        // FIX: Validate exclude_patterns - filter out empty strings and validate format
+        const validExcludePatterns = exclude_patterns.filter(p => 
+          p && p.length > 0 && /^[a-zA-Z0-9_\-\.\*\/]+$/.test(p)
+        );
+        const excludeFlags = validExcludePatterns
+          .map((p) => `--exclude="${shellEscape(p)}"`)
           .join(" ");
 
         const rsyncCheck = await runCommand("which rsync", undefined, 5000);
         let uploadResult;
 
         if (rsyncCheck.exitCode === 0) {
-          const keyFlag = profile.identity_file
-            ? `-e "ssh -i ${profile.identity_file} -p ${profile.port} -o StrictHostKeyChecking=no"`
+          const safeIdentity = profile.identity_file ? shellEscape(profile.identity_file) : "";
+          const safeUser = shellEscape(profile.user);
+          const safeHost = shellEscape(profile.host);
+          const safeLocalPath = shellEscape(resolvedLocal);
+          const keyFlag = safeIdentity
+            ? `-e "ssh -i ${safeIdentity} -p ${profile.port} -o StrictHostKeyChecking=no"`
             : `-e "ssh -p ${profile.port} -o StrictHostKeyChecking=no"`;
 
-          const rsyncCmd = `rsync -avz --progress ${excludeFlags} ${keyFlag} "${resolvedLocal}/" ${profile.user}@${profile.host}:"${remote_path}/"`;
+          const safeRemotePath = shellEscape(remote_path);
+          const rsyncCmd = `rsync -avz --progress ${excludeFlags} ${keyFlag} "${safeLocalPath}/" "${safeUser}@${safeHost}":"${safeRemotePath}/"`;
           uploadResult = await runCommand(rsyncCmd, undefined, 300000);
           lines.push(`   Method: rsync`);
         } else {
@@ -591,8 +980,9 @@ export function registerVpsTools(server: McpServer): void {
           lines.push("⚡ Post-deploy commands:");
           for (const cmd of post_commands) {
             lines.push(`   $ ${cmd}`);
+            const safeRemotePath = shellEscape(remote_path);
             const r = await runCommand(
-              buildSshCmd(profile, `cd "${remote_path}" && ${cmd}`),
+              buildSshCmd(profile, `cd "${safeRemotePath}" && ${cmd}`),
               undefined, 120000
             );
             const out = (r.stdout + r.stderr).trim().slice(0, 300);
@@ -679,45 +1069,66 @@ export function registerVpsTools(server: McpServer): void {
 
         let cmd = "";
         switch (log_source) {
-          case "journalctl":
+          case "journalctl": {
+            const safeService = service_name ? shellEscape(service_name) : "";
+            const safeSince = since ? shellEscape(since) : "";
+            const safeFilter = filter_keyword ? shellEscape(filter_keyword) : "";
             cmd = [
               "journalctl",
-              service_name ? `-u ${service_name}` : "",
-              since ? `--since "${since}"` : `-n ${lines}`,
+              safeService ? `-u "${safeService}"` : "",
+              safeSince ? `--since "${safeSince}"` : `-n ${lines}`,
               "--no-pager",
-              filter_keyword ? `| grep -i "${filter_keyword}"` : "",
+              safeFilter ? `| grep -i "${safeFilter}"` : "",
             ].filter(Boolean).join(" ");
             break;
+          }
 
-          case "pm2":
-            cmd = service_name
-              ? `pm2 logs ${service_name} --lines ${lines} --nostream`
+          case "pm2": {
+            const safeService = service_name ? shellEscape(service_name) : "";
+            const safeFilter = filter_keyword ? shellEscape(filter_keyword) : "";
+            cmd = safeService
+              ? `pm2 logs "${safeService}" --lines ${lines} --nostream`
               : `pm2 logs --lines ${lines} --nostream`;
-            if (filter_keyword) cmd += ` | grep -i "${filter_keyword}"`;
+            if (safeFilter) cmd += ` | grep -i "${safeFilter}"`;
             break;
+          }
 
-          case "file":
+          case "file": {
             if (!log_file) throw new Error("log_file wajib untuk log_source 'file'");
-            cmd = filter_keyword
-              ? `tail -n ${lines} "${log_file}" | grep -i "${filter_keyword}"`
-              : `tail -n ${lines} "${log_file}"`;
+            const safeLogFile = shellEscape(log_file);
+            const safeFilter = filter_keyword ? shellEscape(filter_keyword) : "";
+            cmd = safeFilter
+              ? `tail -n ${lines} "${safeLogFile}" | grep -i "${safeFilter}"`
+              : `tail -n ${lines} "${safeLogFile}"`;
             break;
+          }
 
-          case "nginx":
-            cmd = filter_keyword
-              ? `tail -n ${lines} /var/log/nginx/access.log /var/log/nginx/error.log 2>/dev/null | grep -i "${filter_keyword}"`
+          case "nginx": {
+            const safeFilter = filter_keyword ? shellEscape(filter_keyword) : "";
+            cmd = safeFilter
+              ? `tail -n ${lines} /var/log/nginx/access.log /var/log/nginx/error.log 2>/dev/null | grep -i "${safeFilter}"`
               : `tail -n ${lines} /var/log/nginx/error.log 2>/dev/null`;
             break;
+          }
 
-          case "docker":
+          case "docker": {
             if (!service_name) throw new Error("service_name (container name) wajib untuk docker");
-            cmd = `docker logs --tail ${lines} ${service_name} 2>&1`;
-            if (filter_keyword) cmd += ` | grep -i "${filter_keyword}"`;
+            const safeService = shellEscape(service_name);
+            const safeFilter = filter_keyword ? shellEscape(filter_keyword) : "";
+            cmd = `docker logs --tail ${lines} "${safeService}" 2>&1`;
+            if (safeFilter) cmd += ` | grep -i "${safeFilter}"`;
             break;
+          }
 
-          case "custom":
-            cmd = log_file ?? "journalctl -n 50 --no-pager";
+          case "custom": {
+            // FIX: Use tail to read file instead of executing it
+            const safeLogFile = log_file ? shellEscape(log_file) : "";
+            const safeFilter = filter_keyword ? shellEscape(filter_keyword) : "";
+            cmd = safeLogFile 
+              ? (safeFilter ? `tail -n ${lines} "${safeLogFile}" | grep -i "${safeFilter}"` : `tail -n ${lines} "${safeLogFile}"`)
+              : "journalctl -n 50 --no-pager";
             break;
+          }
         }
 
         const sshCmd = buildSshCmd(profile, cmd);
@@ -765,16 +1176,17 @@ export function registerVpsTools(server: McpServer): void {
           return { content: [{ type: "text", text: `❌ Server '${serverName}' tidak ditemukan.` }] };
         }
 
+        const safeService = service_name ? shellEscape(service_name) : "";
         let cmd = "";
         if (manager === "pm2") {
           switch (action) {
             case "list": cmd = "pm2 list"; break;
-            case "status": cmd = service_name ? `pm2 show ${service_name}` : "pm2 list"; break;
-            case "start": cmd = `pm2 start ${service_name}`; break;
-            case "stop": cmd = `pm2 stop ${service_name}`; break;
-            case "restart": cmd = `pm2 restart ${service_name}`; break;
-            case "reload": cmd = `pm2 reload ${service_name}`; break;
-            case "logs": cmd = `pm2 logs ${service_name ?? ""} --lines 30 --nostream`; break;
+            case "status": cmd = safeService ? `pm2 show "${safeService}"` : "pm2 list"; break;
+            case "start": cmd = safeService ? `pm2 start "${safeService}"` : "pm2 list"; break;
+            case "stop": cmd = safeService ? `pm2 stop "${safeService}"` : "pm2 list"; break;
+            case "restart": cmd = safeService ? `pm2 restart "${safeService}"` : "pm2 list"; break;
+            case "reload": cmd = safeService ? `pm2 reload "${safeService}"` : "pm2 list"; break;
+            case "logs": cmd = safeService ? `pm2 logs "${safeService}" --lines 30 --nostream` : "pm2 logs --lines 30 --nostream"; break;
             case "save": cmd = "pm2 save"; break;
             case "startup": cmd = "pm2 startup && pm2 save"; break;
           }
@@ -782,15 +1194,21 @@ export function registerVpsTools(server: McpServer): void {
           // systemd
           switch (action) {
             case "list": cmd = "systemctl list-units --type=service --state=running"; break;
-            case "status": cmd = `systemctl status ${service_name}`; break;
-            case "start": cmd = `systemctl start ${service_name}`; break;
-            case "stop": cmd = `systemctl stop ${service_name}`; break;
-            case "restart": cmd = `systemctl restart ${service_name}`; break;
-            case "reload": cmd = `systemctl reload ${service_name}`; break;
-            case "logs": cmd = `journalctl -u ${service_name} -n 30 --no-pager`; break;
-            case "save": cmd = `systemctl enable ${service_name}`; break;
-            case "startup": cmd = `systemctl enable ${service_name} && systemctl start ${service_name}`; break;
+            case "status": cmd = safeService ? `systemctl status "${safeService}"` : "systemctl list-units --type=service --state=running"; break;
+            case "start": cmd = safeService ? `systemctl start "${safeService}"` : ""; break;
+            case "stop": cmd = safeService ? `systemctl stop "${safeService}"` : ""; break;
+            case "restart": cmd = safeService ? `systemctl restart "${safeService}"` : ""; break;
+            case "reload": cmd = safeService ? `systemctl reload "${safeService}"` : ""; break;
+            case "logs": cmd = safeService ? `journalctl -u "${safeService}" -n 30 --no-pager` : "journalctl -n 30 --no-pager"; break;
+            case "save": cmd = safeService ? `systemctl enable "${safeService}"` : ""; break;
+            case "startup": cmd = safeService ? `systemctl enable "${safeService}" && systemctl start "${safeService}"` : ""; break;
           }
+        }
+        // Validate that service_name is provided for actions that require it
+        if (["start", "stop", "restart", "reload", "save", "startup"].includes(action) && manager === "systemd" && !safeService) {
+          return {
+            content: [{ type: "text", text: `❌ service_name wajib untuk aksi '${action}' pada systemd` }],
+          };
         }
 
         const result = await runCommand(
@@ -882,64 +1300,96 @@ export function registerVpsTools(server: McpServer): void {
 
         let cmd = "";
         switch (action) {
-          case "query":
+          case "query": {
             if (!sql) throw new Error("sql wajib untuk action 'query'");
-            if (hasTursoCli && dbUrl) {
-              cmd = `turso db shell "${dbUrl}" "${sql.replace(/"/g, '\\"')}"`;
+            if (!dbUrl) throw new Error("database_url wajib untuk query");
+            // Escape SQL untuk shell - gunakan base64 encoding untuk menghindari injection
+            const sqlB64 = Buffer.from(sql, 'utf-8').toString('base64');
+            const safeDbUrl = shellEscape(dbUrl);
+            if (hasTursoCli) {
+              // Gunakan heredoc untuk safely pass SQL
+              cmd = `echo '${sqlB64}' | base64 -d | turso db shell "${safeDbUrl}"`;
             } else {
-              // Fallback: gunakan libsql via node jika tersedia
+              // Fallback: gunakan libsql via node dengan base64 encoded SQL
+              const safeDbUrlJs = dbUrl.replace(/'/g, "'\"'\"'");
+              const safeTokenJs = token?.replace(/'/g, "'\"'\"'") ?? "";
               cmd = `node -e "
 const {createClient}=require('@libsql/client');
-const db=createClient({url:'${dbUrl}',authToken:'${token}'});
-db.execute(\`${sql.replace(/`/g, "\\`")}\`).then(r=>console.log(JSON.stringify(r.rows,null,2))).catch(e=>console.error(e.message));
+const db=createClient({url:'${safeDbUrlJs}',authToken:'${safeTokenJs}'});
+const sql = Buffer.from('${sqlB64}', 'base64').toString('utf-8');
+db.execute(sql).then(r=>console.log(JSON.stringify(r.rows,null,2))).catch(e=>console.error(e.message));
 "`;
             }
             break;
+          }
 
-          case "list_tables":
-            if (hasTursoCli && dbUrl) {
-              cmd = `turso db shell "${dbUrl}" ".tables"`;
+          case "list_tables": {
+            if (!dbUrl) throw new Error("database_url wajib untuk list_tables");
+            const listTablesSql = "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name";
+            const sqlB64 = Buffer.from(listTablesSql, 'utf-8').toString('base64');
+            const safeDbUrl = shellEscape(dbUrl);
+            if (hasTursoCli) {
+              cmd = `echo '${sqlB64}' | base64 -d | turso db shell "${safeDbUrl}"`;
             } else {
+              const safeDbUrlJs = dbUrl.replace(/'/g, "'\"'\"'");
+              const safeTokenJs = token?.replace(/'/g, "'\"'\"'") ?? "";
               cmd = `node -e "
 const {createClient}=require('@libsql/client');
-const db=createClient({url:'${dbUrl}',authToken:'${token}'});
-db.execute('SELECT name FROM sqlite_master WHERE type=\\'table\\' ORDER BY name').then(r=>r.rows.forEach(row=>console.log(row.name))).catch(e=>console.error(e));
+const db=createClient({url:'${safeDbUrlJs}',authToken:'${safeTokenJs}'});
+const sql = Buffer.from('${sqlB64}', 'base64').toString('utf-8');
+db.execute(sql).then(r=>r.rows.forEach(row=>console.log(row.name))).catch(e=>console.error(e));
 "`;
             }
             break;
+          }
 
-          case "schema":
-            if (hasTursoCli && dbUrl) {
-              cmd = `turso db shell "${dbUrl}" ".schema"`;
+          case "schema": {
+            if (!dbUrl) throw new Error("database_url wajib untuk schema");
+            const schemaSql = "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name";
+            const sqlB64 = Buffer.from(schemaSql, 'utf-8').toString('base64');
+            const safeDbUrl = shellEscape(dbUrl);
+            if (hasTursoCli) {
+              cmd = `echo '${sqlB64}' | base64 -d | turso db shell "${safeDbUrl}"`;
             } else {
+              const safeDbUrlJs = dbUrl.replace(/'/g, "'\"'\"'");
+              const safeTokenJs = token?.replace(/'/g, "'\"'\"'") ?? "";
               cmd = `node -e "
 const {createClient}=require('@libsql/client');
-const db=createClient({url:'${dbUrl}',authToken:'${token}'});
-db.execute('SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type,name').then(r=>r.rows.forEach(row=>console.log(row.sql+';'))).catch(e=>console.error(e));
+const db=createClient({url:'${safeDbUrlJs}',authToken:'${safeTokenJs}'});
+const sql = Buffer.from('${sqlB64}', 'base64').toString('utf-8');
+db.execute(sql).then(r=>r.rows.forEach(row=>console.log(row.sql+';'))).catch(e=>console.error(e));
 "`;
             }
             break;
+          }
 
           case "db_list":
             cmd = "turso db list";
             break;
 
-          case "db_create":
+          case "db_create": {
             if (!db_name) throw new Error("db_name wajib");
-            cmd = `turso db create ${db_name}`;
+            const safeDbName = shellEscape(db_name);
+            cmd = `turso db create "${safeDbName}"`;
             break;
+          }
 
-          case "backup":
+          case "backup": {
             if (!dbUrl) throw new Error("database_url wajib untuk backup");
+            const safeDbUrl = shellEscape(dbUrl);
             const backupFile = path.join(os.homedir(), `.android-expert-mcp/turso_backup_${Date.now()}.sql`);
-            cmd = `turso db shell "${dbUrl}" ".dump" > "${backupFile}" && echo "Backup: ${backupFile}"`;
+            cmd = `turso db shell "${safeDbUrl}" ".dump" > "${backupFile}" && echo "Backup: ${backupFile}"`;
             break;
+          }
 
-          case "exec_file":
+          case "exec_file": {
             if (!sql_file) throw new Error("sql_file wajib");
             if (!dbUrl) throw new Error("database_url wajib");
-            cmd = `turso db shell "${dbUrl}" < "${path.resolve(sql_file)}"`;
+            const safeDbUrl = shellEscape(dbUrl);
+            const safeSqlFile = shellEscape(path.resolve(sql_file));
+            cmd = `turso db shell "${safeDbUrl}" < "${safeSqlFile}"`;
             break;
+          }
         }
 
         let result;

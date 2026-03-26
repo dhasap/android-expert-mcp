@@ -23,6 +23,11 @@ export declare function runCommand(command: string, cwd?: string, timeoutMs?: nu
  */
 export declare function runStreamingCommand(args: string[], cwd: string, timeoutMs?: number): Promise<CommandResult>;
 /**
+ * Escape a string for safe use in shell commands.
+ * Prevents command injection attacks.
+ */
+export declare function shellEscape(str: string): string;
+/**
  * Build a directory tree string (like `tree` command output).
  */
 export declare function buildDirectoryTree(dirPath: string, indent?: string, maxDepth?: number, currentDepth?: number): Promise<string>;
@@ -154,6 +159,7 @@ export declare function atomicReadJson<T>(filePath: string, defaultValue: T): Pr
 /**
  * Write data to a JSON file atomically using a `.tmp` side-file + rename.
  * This prevents a corrupt file if the process crashes mid-write.
+ * Uses fsync to ensure data is flushed to disk before rename.
  */
 export declare function atomicWriteJson(filePath: string, data: unknown): Promise<void>;
 /**
